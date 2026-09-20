@@ -38,8 +38,58 @@ func streamEmitError(streamID, message string) {
 		return
 	}
 	// A-37: never emit raw upstream bodies that may contain Bearer/JWT.
-	errJSON, _ := json.Marshal(map[string]any{"error": map[string]any{"message": redactSecrets(message)}})
-	_ = streamEmit(streamID, errJSON)
+	body, _ := json.Marshal(map[string]any{"stream_id": streamID, "error": redactSecrets(message)})
+	_, _ = hostCall(pluginabi.MethodHostStreamEmit, body)
+}
+
+func unwrapQoderFrame(line string) (string, error) {
+	if strings.TrimSpace(line) == "event:error" || strings.TrimSpace(line) == "event: error" {
+		return "", fmt.Errorf("qoder upstream error event")
+	}
+	if !strings.HasPrefix(line, "data:") {
+		return "", nil
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	if payload == "[DONE]" {
+		return payload, nil
+	}
+	var outer struct {
+		Body   json.RawMessage `json:"body"`
+		Status int             `json:"statusCodeValue"`
+	}
+	if json.Unmarshal([]byte(payload), &outer) != nil {
+		return "", nil
+	}
+	var body string
+	if len(outer.Body) > 0 {
+		if json.Unmarshal(outer.Body, &body) != nil {
+			body = string(outer.Body)
+		}
+	} else {
+		body = payload
+	}
+	if strings.TrimSpace(body) == "[DONE]" {
+		return "[DONE]", nil
+	}
+	var chunk struct {
+		Error   json.RawMessage `json:"error"`
+		Choices json.RawMessage `json:"choices"`
+		Usage   json.RawMessage `json:"usage"`
+	}
+	_ = json.Unmarshal([]byte(body), &chunk)
+	if outer.Status >= 400 || (len(chunk.Error) > 0 && string(chunk.Error) != "null") {
+		var detail struct {
+			Code    any    `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(chunk.Error, &detail)
+		return "", fmt.Errorf("qoder upstream rejected request (status=%d code=%v type=%s): %s", outer.Status, detail.Code, detail.Type, truncateRedacted(detail.Message, 200))
+	}
+	if len(chunk.Choices) == 0 && len(chunk.Usage) == 0 {
+		return "", nil
+	}
+	return body, nil
 }
 
 var streamCloseOnce sync.Map // streamID -> sync.Once
@@ -107,20 +157,17 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		return
 	}
 	collector := &sseUsageCollector{}
+	emitted := false
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
+		bodyStr, frameErr := unwrapQoderFrame(scanner.Text())
+		if frameErr != nil {
+			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, frameErr.Error())
+			streamEmitError(streamID, frameErr.Error())
+			return
 		}
-		payload := strings.TrimPrefix(line, "data:")
-		var outer map[string]any
-		if json.Unmarshal([]byte(payload), &outer) != nil {
-			continue
-		}
-		bodyStr, ok := outer["body"].(string)
-		if !ok {
+		if bodyStr == "" {
 			continue
 		}
 		if bodyStr == "[DONE]" {
@@ -139,12 +186,19 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, "stream_emit: "+err.Error())
 			return
 		}
+		emitted = true
 	}
 	// A mid-stream read failure means the client received a truncated stream:
 	// surface it as an error frame and record the attempt as failed.
 	if err := scanner.Err(); err != nil {
 		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, err.Error())
 		streamEmitError(streamID, fmt.Sprintf("upstream stream read error: %v", err))
+		return
+	}
+	if !emitted {
+		message := "qoder upstream stream closed without any completion payload"
+		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, message)
+		streamEmitError(streamID, message)
 		return
 	}
 	publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
@@ -178,17 +232,11 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
+		bodyStr, frameErr := unwrapQoderFrame(scanner.Text())
+		if frameErr != nil {
+			return chunks, 0, frameErr
 		}
-		payload := strings.TrimPrefix(line, "data:")
-		var outer map[string]any
-		if json.Unmarshal([]byte(payload), &outer) != nil {
-			continue
-		}
-		bodyStr, ok := outer["body"].(string)
-		if !ok || bodyStr == "[DONE]" {
+		if bodyStr == "" || bodyStr == "[DONE]" {
 			continue
 		}
 		if collector != nil {
@@ -205,6 +253,9 @@ func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey str
 	}
 	if err := scanner.Err(); err != nil {
 		return chunks, 0, fmt.Errorf("upstream stream read error: %w", err)
+	}
+	if len(chunks) == 0 {
+		return chunks, 0, fmt.Errorf("qoder upstream stream closed without any completion payload")
 	}
 	return chunks, 0, nil
 }
@@ -426,18 +477,11 @@ func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
-			// Skip event:/id:/retry:/comment lines
-			continue
+		bodyStr, frameErr := unwrapQoderFrame(scanner.Text())
+		if frameErr != nil {
+			return nil, frameErr
 		}
-		payload := strings.TrimPrefix(line, "data:")
-		var outer map[string]any
-		if err := json.Unmarshal([]byte(payload), &outer); err != nil {
-			continue
-		}
-		bodyStr, ok := outer["body"].(string)
-		if !ok {
+		if bodyStr == "" {
 			continue
 		}
 		if bodyStr == "[DONE]" {
@@ -451,6 +495,9 @@ func aggregateQoderSSE(r io.Reader, model string) ([]byte, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("qoder SSE read: %w", err)
+	}
+	if inner.Len() == 0 {
+		return nil, fmt.Errorf("qoder upstream stream closed without any completion payload")
 	}
 	return aggregateCompletion(strings.NewReader(inner.String()), model)
 }
