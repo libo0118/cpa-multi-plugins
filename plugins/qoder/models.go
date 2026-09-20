@@ -34,6 +34,32 @@ func wbModels() []pluginapi.ModelInfo {
 	}
 }
 
+// International fallback IDs supplied for the current Qoder catalog. Successful
+// upstream discovery remains authoritative; a fallback is not an entitlement check.
+func fallbackModels(region string) []pluginapi.ModelInfo {
+	if region != regionIntl {
+		return wbModels()
+	}
+	entries := [][2]string{
+		{"auto", "Auto"}, {"ultimate", "Ultimate"},
+		{"performance", "Performance"}, {"efficient", "Efficient"},
+		{"lite", "Lite"}, {"smodel", "Sonus"}, {"cmodel", "Cantus"},
+		{"qmodel_38max", "Qwen3.8-Max"}, {"qfmodel", "Qwen3.8-Flash"},
+		{"qmodel_latest", "Qwen3.7-Max"}, {"qmodel", "Qwen3.7-Plus"},
+		{"kmodel_latest", "Kimi-K3"}, {"kmodel", "Kimi-K2.8-Preview"},
+		{"gmodel", "GLM-5.3"}, {"gfmodel", "GLM-5.3-Flash"},
+		{"dmodel", "DeepSeek-V4-Pro"}, {"dfmodel", "DeepSeek-Flash"},
+		{"mmodel", "MiniMax-M3"},
+	}
+	models := make([]pluginapi.ModelInfo, 0, len(entries))
+	for _, entry := range entries {
+		models = append(models, pluginapi.ModelInfo{ID: entry[0], Name: entry[1], DisplayName: entry[1],
+			ContextLength: 180000, MaxCompletionTokens: 8192, OwnedBy: providerName,
+			SupportedGenerationMethods: []string{"chat"}})
+	}
+	return models
+}
+
 func cachedDynamicModels() ([]pluginapi.ModelInfo, bool) {
 	dynamicModelsCache.RLock()
 	defer dynamicModelsCache.RUnlock()
@@ -54,7 +80,7 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 	if models, ok := cachedDynamicModels(); ok {
 		return models
 	}
-	models := wbModels()
+	models := fallbackModels(loadedLoginRegion())
 	files, err := hostAuthListFiles()
 	if err != nil || len(files) == 0 {
 		return models
@@ -97,7 +123,7 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 		storeDynamicModels(dyn)
 		return dyn
 	}
-	return fetchDynamicModels()
+	return fallbackModels(authRegion(sa))
 }
 
 // fetchDynamicModels calls the QoderWork API to get the latest model list.

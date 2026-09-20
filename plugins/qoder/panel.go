@@ -190,7 +190,7 @@ func buildDashboardEx(force, fetchCredits bool) map[string]any {
 
 // summarizeCredits aggregates remain/used across dashboard accounts.
 func summarizeCredits(accounts []wbAccount) map[string]any {
-	var remain, used, size, cnRemain, cnUsed, cnSize, glRemain, glUsed, glSize int64
+	var remain, used, size, cnRemain, cnUsed, cnSize, glRemain, glUsed, glSize float64
 	var known, disabledN, exhaustedN, packs int
 	for _, a := range accounts {
 		if a.Disabled {

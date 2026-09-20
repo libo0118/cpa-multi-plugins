@@ -29,11 +29,12 @@ var billingBase = "https://openapi.qoder.com.cn" // unused legacy var, kept for 
 
 type creditsSummary struct {
 	// TotalRemain is currently usable credits across all active packages.
-	TotalRemain int64 `json:"total_remain"`
+	TotalRemain float64 `json:"total_remain"`
 	// TotalUsed is consumed credits in the current cycle (sum of packages).
-	TotalUsed int64 `json:"total_used"`
+	TotalUsed float64 `json:"total_used"`
 	// TotalSize is the credit capacity/pool (sum of package sizes). remain+used ≈ size.
-	TotalSize int64 `json:"total_size"`
+	TotalSize float64 `json:"total_size"`
+	SizeKnown bool `json:"size_known"`
 	// PackCount is number of resource packages included in the aggregate.
 	PackCount int `json:"pack_count"`
 	// FetchedAt is when this snapshot was taken (RFC3339). Upstream billing lag
@@ -45,9 +46,12 @@ type creditsSummary struct {
 
 type packageSummary struct {
 	Name       string `json:"name"`
-	Remain     int64  `json:"remain"`
-	Used       int64  `json:"used"`
-	Size       int64  `json:"size"`
+	Remain     float64  `json:"remain"`
+	Used       float64  `json:"used"`
+	Size       float64  `json:"size"`
+	Kind       string `json:"kind"`
+	SizeKnown  bool `json:"size_known"`
+	Available  bool `json:"available"`
 	CycleStart string `json:"cycle_start"`
 	CycleEnd   string `json:"cycle_end"`
 }

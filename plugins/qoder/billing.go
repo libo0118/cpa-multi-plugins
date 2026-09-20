@@ -76,8 +76,7 @@ func fetchCheckinStatus(sa *storedAuth) (*checkinSummary, error) {
 }
 
 // quotaUsageResponse mirrors GET /api/v2/quota/usage response (plain JSON,
-// no envelope). Both userQuota (base credits) and addOnQuota (one-time pro
-// upgrade + checkin packs) are summed for the panel.
+// no envelope).
 type quotaUsageResponse struct {
         UserID               string  `json:"userId"`
         UserType             string  `json:"userType"`
@@ -86,21 +85,73 @@ type quotaUsageResponse struct {
         IsQuotaExceeded      bool    `json:"isQuotaExceeded"`
         ExpiresAt            int64   `json:"expiresAt"` // ms epoch
         UpgradeURL           string  `json:"upgradeUrl"`
-        UserQuota            struct {
-                Total     float64 `json:"total"`
-                Used      float64 `json:"used"`
-                Remaining float64 `json:"remaining"`
-                Unit      string  `json:"unit"`
-        } `json:"userQuota"`
-        AddOnQuota struct {
-                Total     float64 `json:"total"`
-                Used      float64 `json:"used"`
-                Remaining float64 `json:"remaining"`
-        } `json:"addOnQuota"`
+        UserQuota *quotaPool `json:"userQuota"`
+        AddOnQuota *quotaPool `json:"addOnQuota"`
+        DedicatedResourcePackages []quotaPool `json:"dedicatedResourcePackages"`
+        OrgResourcePackage *quotaPool `json:"orgResourcePackage"`
 }
 
-// fetchUserResource queries QoderWork's quota endpoint and aggregates base +
-// add-on credits into the panel's creditsSummary shape.
+type quotaPool struct {
+        Name string `json:"name"`
+        Total *float64 `json:"total"`
+        Used float64 `json:"used"`
+        Remaining float64 `json:"remaining"`
+        Cap *float64 `json:"cap"`
+        Available *bool `json:"available"`
+        ExpiresAt int64 `json:"expiresAt"`
+        Status string `json:"status"`
+        DisplayLabels []struct {
+                Dimension string `json:"dimension"`
+                Value string `json:"value"`
+                ValueI18n map[string]string `json:"valueI18n"`
+        } `json:"displayLabels"`
+}
+
+func summarizeQuota(q quotaUsageResponse, now time.Time) *creditsSummary {
+        sum := &creditsSummary{SizeKnown: true, Packages: []packageSummary{}}
+        appendPool := func(pool *quotaPool, kind, name string, fallbackExpiry int64) {
+                if pool == nil { return }
+                if kind == "addon" && pool.Used == 0 && pool.Remaining == 0 && (pool.Total == nil || *pool.Total == 0) { return }
+                expiry := pool.ExpiresAt
+                if expiry == 0 { expiry = fallbackExpiry }
+                pack := packageSummary{Name: name, Kind: kind, Remain: pool.Remaining, Used: pool.Used, Available: pool.Available == nil || *pool.Available}
+                capacity := pool.Total
+                if kind == "shared" { capacity = pool.Cap }
+                if capacity != nil && *capacity >= 0 { pack.Size, pack.SizeKnown = *capacity, true }
+                if expiry > 0 {
+                        pack.CycleEnd = time.UnixMilli(expiry).UTC().Format(time.RFC3339)
+                        if expiry <= now.UnixMilli() { pack.Available = false }
+                }
+                if pool.Status != "" && pool.Status != "QUOTA_DETAIL_STATUS_ACTIVE" { pack.Available = false }
+                sum.Packages = append(sum.Packages, pack)
+                if pack.Available {
+                        sum.TotalRemain += pack.Remain
+                        sum.TotalUsed += pack.Used
+                        sum.TotalSize += pack.Size
+                        sum.SizeKnown = sum.SizeKnown && pack.SizeKnown
+                        sum.PackCount++
+                }
+        }
+        planName := "基础额度"
+        if strings.EqualFold(q.UserType, "teams") { planName = "套餐内 Credits (Teams)" }
+        appendPool(q.UserQuota, "plan", planName, q.ExpiresAt)
+        appendPool(q.AddOnQuota, "addon", "赠送/签到额度", 0)
+        for _, pool := range q.DedicatedResourcePackages {
+                name := pool.Name
+                for _, label := range pool.DisplayLabels {
+                        if label.Dimension != "title" { continue }
+                        for _, title := range []string{label.ValueI18n["zh-CN"], label.ValueI18n["en-US"], label.Value} {
+                                if strings.TrimSpace(title) != "" { name = title; break }
+                        }
+                        break
+                }
+                if name == "" { name = "专属积分" }
+                appendPool(&pool, "dedicated", name, 0)
+        }
+        appendPool(q.OrgResourcePackage, "shared", "共享资源包", 0)
+        return sum
+}
+
 func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
         req, err := http.NewRequest(http.MethodGet, upstreamBaseFor(sa)+"/api/v2/quota/usage", nil)
         if err != nil {
@@ -118,17 +169,7 @@ func fetchUserResource(sa *storedAuth) (*creditsSummary, error) {
         if err := json.Unmarshal(resp.Body, &q); err != nil {
                 return nil, fmt.Errorf("quota/usage parse: %w", err)
         }
-        sum := &creditsSummary{
-                TotalRemain: int64(q.UserQuota.Remaining + q.AddOnQuota.Remaining),
-                TotalUsed:   int64(q.UserQuota.Used + q.AddOnQuota.Used),
-                TotalSize:   int64(q.UserQuota.Total + q.AddOnQuota.Total),
-                PackCount:   2,
-                Packages: []packageSummary{
-                        {Name: "基础额度", Remain: int64(q.UserQuota.Remaining), Used: int64(q.UserQuota.Used), Size: int64(q.UserQuota.Total)},
-                        {Name: "赠送/签到额度", Remain: int64(q.AddOnQuota.Remaining), Used: int64(q.AddOnQuota.Used), Size: int64(q.AddOnQuota.Total)},
-                },
-        }
-        return sum, nil
+        return summarizeQuota(q, time.Now()), nil
 }
 
 // planResponse mirrors GET /api/v2/user/plan (plain JSON, no envelope).

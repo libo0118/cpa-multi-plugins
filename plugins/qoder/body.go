@@ -6,9 +6,11 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,8 +49,84 @@ func cpaToUpstreamKey(cpaModel string) string {
 
 // openAIMessage is one message in the OpenAI chat completion format.
 type openAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string `json:"role"`
+	Content    string `json:"content"`
+	rawContent json.RawMessage
+	rawFields  map[string]json.RawMessage
+}
+
+func (m *openAIMessage) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	delete(fields, "role")
+	delete(fields, "content")
+	content := bytes.TrimSpace(raw.Content)
+	var text string
+	switch {
+	case len(content) == 0 || bytes.Equal(content, []byte("null")):
+	case content[0] == '"':
+		if err := json.Unmarshal(content, &text); err != nil {
+			return err
+		}
+	case content[0] == '[':
+		var parts []struct {
+			Type     string  `json:"type"`
+			Text     *string `json:"text"`
+			ImageURL *struct {
+				URL string `json:"url"`
+			} `json:"image_url"`
+		}
+		if err := json.Unmarshal(content, &parts); err != nil {
+			return fmt.Errorf("unsupported message content array: %w", err)
+		}
+		var joined strings.Builder
+		for i, part := range parts {
+			if part.Type == "image_url" {
+				if part.ImageURL == nil || strings.TrimSpace(part.ImageURL.URL) == "" {
+					return fmt.Errorf("unsupported message content part %d: image_url.url must be a nonempty string", i)
+				}
+				continue
+			}
+			if part.Type != "text" && part.Type != "input_text" {
+				return fmt.Errorf("unsupported message content part %d type %q", i, part.Type)
+			}
+			if part.Text == nil {
+				return fmt.Errorf("unsupported message content part %d: text must be a string", i)
+			}
+			joined.WriteString(*part.Text)
+		}
+		text = joined.String()
+	default:
+		return fmt.Errorf("unsupported message content: expected string, null, or content array")
+	}
+	*m = openAIMessage{Role: raw.Role, Content: text, rawFields: fields}
+	if len(content) > 0 && content[0] != '"' {
+		m.rawContent = append(json.RawMessage(nil), content...)
+	}
+	return nil
+}
+
+func (m openAIMessage) MarshalJSON() ([]byte, error) {
+	fields := make(map[string]json.RawMessage, len(m.rawFields)+2)
+	for name, value := range m.rawFields {
+		fields[name] = value
+	}
+	fields["role"], _ = json.Marshal(m.Role)
+	if len(m.rawContent) > 0 {
+		fields["content"] = m.rawContent
+	} else {
+		fields["content"], _ = json.Marshal(m.Content)
+	}
+	return json.Marshal(fields)
 }
 
 // openAIRequest is the CPA-facing chat completion request.
@@ -123,10 +201,7 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 	}
 	// Append the actual conversation
 	for _, m := range req.Messages {
-		systemMsgs = append(systemMsgs, map[string]any{
-			"role":    m.Role,
-			"content": m.Content,
-		})
+		systemMsgs = append(systemMsgs, m)
 	}
 	base["messages"] = systemMsgs
 

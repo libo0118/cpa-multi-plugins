@@ -151,14 +151,14 @@ func displayNote(sa *storedAuth, cr *creditsSummary, disabled bool) string {
 	case cr == nil:
 		parts = append(parts, "积分未知")
 	case isCreditsExhausted(cr):
-		parts = append(parts, fmt.Sprintf("耗尽 · 余%d 已用%d", cr.TotalRemain, cr.TotalUsed))
+		parts = append(parts, fmt.Sprintf("耗尽 · 余%g 已用%g", cr.TotalRemain, cr.TotalUsed))
 	default:
 		// Show remain as primary (what you can still spend). Used is real cycle spend.
 		// Size (capacity) grows with check-in packs — do not treat size↑ as usage↓.
 		if cr.TotalSize > 0 {
-			parts = append(parts, fmt.Sprintf("余%d 已用%d 池%d", cr.TotalRemain, cr.TotalUsed, cr.TotalSize))
+			parts = append(parts, fmt.Sprintf("余%g 已用%g 池%g", cr.TotalRemain, cr.TotalUsed, cr.TotalSize))
 		} else {
-			parts = append(parts, fmt.Sprintf("余%d 已用%d", cr.TotalRemain, cr.TotalUsed))
+			parts = append(parts, fmt.Sprintf("余%g 已用%g", cr.TotalRemain, cr.TotalUsed))
 		}
 	}
 	note := strings.Join(parts, " · ")
