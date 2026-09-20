@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -61,26 +62,31 @@ func fallbackModels(region string) []pluginapi.ModelInfo {
 	return models
 }
 
-func cachedDynamicModels() ([]pluginapi.ModelInfo, bool) {
+// Guarded by dynamicModelsCache: account-specific offers must not cross credentials.
+var dynamicModelsAccountKey string
+
+func modelCatalogAccountKey(sa *storedAuth) string {
+	return fmt.Sprintf("%s:%x", authRegion(sa), sha256.Sum256([]byte(sa.Auth.AccessToken)))
+}
+
+func cachedDynamicModels(key string) ([]pluginapi.ModelInfo, bool) {
 	dynamicModelsCache.RLock()
 	defer dynamicModelsCache.RUnlock()
-	if len(dynamicModelsCache.models) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsCacheTTL {
+	if key == dynamicModelsAccountKey && len(dynamicModelsCache.models) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsCacheTTL {
 		return dynamicModelsCache.models, true
 	}
 	return nil, false
 }
 
-func storeDynamicModels(models []pluginapi.ModelInfo) {
+func storeDynamicModels(key string, models []pluginapi.ModelInfo) {
 	dynamicModelsCache.Lock()
 	dynamicModelsCache.models = models
+	dynamicModelsAccountKey = key
 	dynamicModelsCache.fetched = time.Now()
 	dynamicModelsCache.Unlock()
 }
 
 func fetchDynamicModels() []pluginapi.ModelInfo {
-	if models, ok := cachedDynamicModels(); ok {
-		return models
-	}
 	models := fallbackModels(loadedLoginRegion())
 	files, err := hostAuthListFiles()
 	if err != nil || len(files) == 0 {
@@ -103,9 +109,11 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 		if err != nil || sa == nil {
 			continue
 		}
+		key := modelCatalogAccountKey(sa)
+		if cached, ok := cachedDynamicModels(key); ok { return cached }
 		dyn, err := callModelsAPI(sa)
 		if err == nil && len(dyn) > 0 {
-			storeDynamicModels(dyn)
+			storeDynamicModels(key, dyn)
 			return dyn
 		}
 	}
@@ -113,15 +121,14 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 }
 
 func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
-	if models, ok := cachedDynamicModels(); ok {
-		return models
-	}
 	sa, err := parseStored(storageJSON)
 	if err != nil || sa == nil {
 		return fetchDynamicModels()
 	}
+	key := modelCatalogAccountKey(sa)
+	if models, ok := cachedDynamicModels(key); ok { return models }
 	if dyn, err := callModelsAPI(sa); err == nil && len(dyn) > 0 {
-		storeDynamicModels(dyn)
+		storeDynamicModels(key, dyn)
 		return dyn
 	}
 	return fallbackModels(authRegion(sa))
@@ -135,16 +142,13 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	// model/list needs no body but COSY still requires a body string for signing.
-	// An empty JSON object works (verified in reference_impl.py).
-	encodedBody := qoderEncode([]byte("{}"))
 	rawURL := endpointModelsFor(sa) // includes ?Encode=1
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	// COSY signing needs the encoded body even for GET (signature includes body).
-	if err := applyCosyHeaders(req, sa, encodedBody, rawURL, "", false); err != nil {
+	// Sign the bytes actually sent. GET has an empty body; signing encoded {} causes 403.
+	if err := applyCosyHeaders(req, sa, "", rawURL, "", false); err != nil {
 		return nil, fmt.Errorf("cosy sign: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
@@ -156,9 +160,13 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("models API status %d", resp.StatusCode)
 	}
-	// Response is plain JSON: {"chat":[{key,display_name,...}], "developer":[...], ...}
+	return parseQoderModelCatalog(resp.Body, authRegion(sa))
+}
+
+func parseQoderModelCatalog(body []byte, region string) ([]pluginapi.ModelInfo, error) {
+	// Only use chat-scene pricing; other scenes can have different rates.
 	var apiResp map[string]json.RawMessage
-	if err := json.Unmarshal(resp.Body, &apiResp); err != nil {
+	if err := json.Unmarshal(body, &apiResp); err != nil {
 		return nil, fmt.Errorf("models parse: %w", err)
 	}
 	// Prefer the "chat" scene (matches our inference use case).
@@ -173,13 +181,17 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		IsReasoning    bool    `json:"is_reasoning"`
 		IsVL           bool    `json:"is_vl"`
 		MaxInputTokens int64   `json:"max_input_tokens"`
-		PriceFactor    float64 `json:"price_factor"`
+		PriceFactor    *float64 `json:"price_factor"`
+		OriginalPriceFactor *float64 `json:"original_price_factor"`
 	}
 	if err := json.Unmarshal(chatRaw, &models); err != nil {
 		return nil, fmt.Errorf("chat scene parse: %w", err)
 	}
 	var out []pluginapi.ModelInfo
+	seen := make(map[string]bool)
 	for _, m := range models {
+		if m.Key == "" || seen[m.Key] { continue }
+		seen[m.Key] = true
 		if !m.Enable {
 			continue
 		}
@@ -187,9 +199,20 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		if m.MaxInputTokens > 0 {
 			ctx2 = m.MaxInputTokens
 		}
+		name := m.DisplayName
+		if name == "" { name = m.Key }
+		display := name
+		if m.PriceFactor != nil && *m.PriceFactor >= 0 {
+			rate := fmt.Sprintf("%.2f×", *m.PriceFactor)
+			if m.OriginalPriceFactor != nil && *m.OriginalPriceFactor > *m.PriceFactor {
+				rate = fmt.Sprintf("%.2f× → %s", *m.OriginalPriceFactor, rate)
+			}
+			display += " · " + rate
+		}
 		out = append(out, pluginapi.ModelInfo{
 			ID:                         m.Key,
-			Name:                       m.DisplayName,
+			Name:                       name,
+			DisplayName:                display,
 			ContextLength:              ctx2,
 			MaxCompletionTokens:        8192,
 			OwnedBy:                    providerName,
@@ -198,6 +221,18 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no enabled chat models")
+	}
+	if region == regionIntl {
+		// Keep the existing compatibility IDs when the catalog omits them. Missing rates
+		// remain unknown, while an explicit upstream disable remains authoritative.
+		byID := make(map[string]pluginapi.ModelInfo)
+		for _, model := range out { byID[model.ID] = model }
+		merged := make([]pluginapi.ModelInfo, 0, len(out))
+		for _, model := range fallbackModels(region) {
+			if live, ok := byID[model.ID]; ok { merged = append(merged, live); delete(byID, model.ID) } else if !seen[model.ID] { merged = append(merged, model) }
+		}
+		for _, model := range out { if _, ok := byID[model.ID]; ok { merged = append(merged, model) } }
+		out = merged
 	}
 	return out, nil
 }

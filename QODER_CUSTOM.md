@@ -7,9 +7,15 @@
 - The Credits endpoint exposes Teams/base, dedicated/SOTA and shared pools, decimals, availability, expiry, and unknown capacity.
 - Nested upstream errors are surfaced through the host RPC error field; empty streams cannot silently become successful completions.
 
-These changes do not grant model entitlements or implement organization identity support. Display names and aliases remain CPA configuration (`oauth-model-alias.qoder`), separate from plugin code.
+These changes do not grant model entitlements or implement organization identity support. Routing aliases remain CPA configuration (`oauth-model-alias.qoder`). Model display names can include upstream catalog multipliers; remove redundant `display-name` overrides equal to the alias if they hide these labels.
 
-Merged upstream stable baseline: `v0.12.64`; Qoder custom build version: `0.8.13-qoder.2` (inject with `-ldflags "-X main.version=0.8.13-qoder.2"`). The upstream message passthrough supersedes the earlier custom image parser, while the mixed-content regression test remains. Upstream null-content, tool, reasoning, large-input and account-status handling are retained.
+Merged upstream stable baseline: `v0.12.64`; Qoder custom build version: `0.8.13-qoder.3` (inject with `-ldflags "-X main.version=0.8.13-qoder.3"`). The upstream message passthrough supersedes the earlier custom image parser, while the mixed-content regression test remains. Upstream null-content, tool, reasoning, large-input and account-status handling are retained.
+
+## Catalog multipliers
+
+The model-list GET request signs its actual empty body. Signing an encoded JSON object while sending no body caused `403 Signature invalid` and silently forced the fallback catalog. The chat-scene `price_factor` and optional `original_price_factor` now populate display labels, including valid zero-rate offers and original-to-current comparisons. Missing factors remain unknown; they are never treated as zero or used to estimate request charges.
+
+Catalog caches are scoped to credentials. The existing international compatibility IDs remain when omitted by the catalog, without invented multipliers. Explicitly disabled entries in a valid catalog are not reintroduced by this merge. Current model IDs and upstream routing remain separate from display metadata. Unit tests cover the scene, zero/missing values, discount display, compatibility IDs and credential cache isolation; no model calls are required to refresh metadata.
 
 ## Updating
 
