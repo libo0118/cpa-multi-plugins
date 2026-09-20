@@ -110,7 +110,9 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 			continue
 		}
 		key := modelCatalogAccountKey(sa)
-		if cached, ok := cachedDynamicModels(key); ok { return cached }
+		if cached, ok := cachedDynamicModels(key); ok {
+			return cached
+		}
 		dyn, err := callModelsAPI(sa)
 		if err == nil && len(dyn) > 0 {
 			storeDynamicModels(key, dyn)
@@ -126,7 +128,9 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 		return fetchDynamicModels()
 	}
 	key := modelCatalogAccountKey(sa)
-	if models, ok := cachedDynamicModels(key); ok { return models }
+	if models, ok := cachedDynamicModels(key); ok {
+		return models
+	}
 	if dyn, err := callModelsAPI(sa); err == nil && len(dyn) > 0 {
 		storeDynamicModels(key, dyn)
 		return dyn
@@ -175,14 +179,17 @@ func parseQoderModelCatalog(body []byte, region string) ([]pluginapi.ModelInfo, 
 		return nil, fmt.Errorf("no chat scene in models response")
 	}
 	var models []struct {
-		Key            string  `json:"key"`
-		DisplayName    string  `json:"display_name"`
-		Enable         bool    `json:"enable"`
-		IsReasoning    bool    `json:"is_reasoning"`
-		IsVL           bool    `json:"is_vl"`
-		MaxInputTokens int64   `json:"max_input_tokens"`
-		PriceFactor    *float64 `json:"price_factor"`
+		Key                 string   `json:"key"`
+		DisplayName         string   `json:"display_name"`
+		Enable              bool     `json:"enable"`
+		IsReasoning         bool     `json:"is_reasoning"`
+		IsVL                bool     `json:"is_vl"`
+		MaxInputTokens      int64    `json:"max_input_tokens"`
+		PriceFactor         *float64 `json:"price_factor"`
 		OriginalPriceFactor *float64 `json:"original_price_factor"`
+		ThinkingConfig      map[string]struct {
+			Efforts map[string]json.RawMessage `json:"efforts"`
+		} `json:"thinking_config"`
 	}
 	if err := json.Unmarshal(chatRaw, &models); err != nil {
 		return nil, fmt.Errorf("chat scene parse: %w", err)
@@ -190,7 +197,9 @@ func parseQoderModelCatalog(body []byte, region string) ([]pluginapi.ModelInfo, 
 	var out []pluginapi.ModelInfo
 	seen := make(map[string]bool)
 	for _, m := range models {
-		if m.Key == "" || seen[m.Key] { continue }
+		if m.Key == "" || seen[m.Key] {
+			continue
+		}
 		seen[m.Key] = true
 		if !m.Enable {
 			continue
@@ -200,7 +209,9 @@ func parseQoderModelCatalog(body []byte, region string) ([]pluginapi.ModelInfo, 
 			ctx2 = m.MaxInputTokens
 		}
 		name := m.DisplayName
-		if name == "" { name = m.Key }
+		if name == "" {
+			name = m.Key
+		}
 		display := name
 		if m.PriceFactor != nil && *m.PriceFactor >= 0 {
 			rate := fmt.Sprintf("%.2f×", *m.PriceFactor)
@@ -217,6 +228,7 @@ func parseQoderModelCatalog(body []byte, region string) ([]pluginapi.ModelInfo, 
 			MaxCompletionTokens:        8192,
 			OwnedBy:                    providerName,
 			SupportedGenerationMethods: []string{"chat"},
+			Thinking:                   qoderThinkingSupport(m.ThinkingConfig),
 		})
 	}
 	if len(out) == 0 {
@@ -226,15 +238,50 @@ func parseQoderModelCatalog(body []byte, region string) ([]pluginapi.ModelInfo, 
 		// Keep the existing compatibility IDs when the catalog omits them. Missing rates
 		// remain unknown, while an explicit upstream disable remains authoritative.
 		byID := make(map[string]pluginapi.ModelInfo)
-		for _, model := range out { byID[model.ID] = model }
+		for _, model := range out {
+			byID[model.ID] = model
+		}
 		merged := make([]pluginapi.ModelInfo, 0, len(out))
 		for _, model := range fallbackModels(region) {
-			if live, ok := byID[model.ID]; ok { merged = append(merged, live); delete(byID, model.ID) } else if !seen[model.ID] { merged = append(merged, model) }
+			if live, ok := byID[model.ID]; ok {
+				merged = append(merged, live)
+				delete(byID, model.ID)
+			} else if !seen[model.ID] {
+				merged = append(merged, model)
+			}
 		}
-		for _, model := range out { if _, ok := byID[model.ID]; ok { merged = append(merged, model) } }
+		for _, model := range out {
+			if _, ok := byID[model.ID]; ok {
+				merged = append(merged, model)
+			}
+		}
 		out = merged
 	}
 	return out, nil
+}
+
+// The chat catalog is authoritative: model families do not share effort levels.
+func qoderThinkingSupport(config map[string]struct {
+	Efforts map[string]json.RawMessage `json:"efforts"`
+}) *pluginapi.ThinkingSupport {
+	if len(config) == 0 {
+		return nil
+	}
+	enabled, ok := config["enabled"]
+	if !ok || len(enabled.Efforts) == 0 {
+		return nil
+	}
+	_, canDisable := config["disabled"]
+	support := &pluginapi.ThinkingSupport{ZeroAllowed: canDisable}
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
+		if _, ok := enabled.Efforts[effort]; ok {
+			support.Levels = append(support.Levels, effort)
+		}
+	}
+	if len(support.Levels) == 0 {
+		return nil
+	}
+	return support
 }
 
 func cacheModelAliases(host pluginapi.HostConfigSummary) {

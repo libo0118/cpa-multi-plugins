@@ -9,7 +9,7 @@
 
 These changes do not grant model entitlements or implement organization identity support. Routing aliases remain CPA configuration (`oauth-model-alias.qoder`). Model display names can include upstream catalog multipliers; remove redundant `display-name` overrides equal to the alias if they hide these labels.
 
-Merged upstream stable baseline: `v0.12.64`; Qoder custom build version: `0.8.13-qoder.3` (inject with `-ldflags "-X main.version=0.8.13-qoder.3"`). The upstream message passthrough supersedes the earlier custom image parser, while the mixed-content regression test remains. Upstream null-content, tool, reasoning, large-input and account-status handling are retained.
+Merged upstream stable baseline: `v0.12.64`; Qoder custom build version: `0.8.13-qoder.4` (inject with `-ldflags "-X main.version=0.8.13-qoder.4"`). The upstream message passthrough supersedes the earlier custom image parser, while the mixed-content regression test remains. Upstream null-content, tool, reasoning, large-input and account-status handling are retained.
 
 ## Catalog multipliers
 
@@ -18,6 +18,8 @@ The model-list GET request signs its actual empty body. Signing an encoded JSON 
 Catalog caches are scoped to credentials. The existing international compatibility IDs remain when omitted by the catalog, without invented multipliers. Explicitly disabled entries in a valid catalog are not reintroduced by this merge. Current model IDs and upstream routing remain separate from display metadata. Unit tests cover the scene, zero/missing values, discount display, compatibility IDs and credential cache isolation; no model calls are required to refresh metadata.
 
 ## Updating
+
+The chat catalog's `thinking_config.enabled.efforts` supplies per-model `Thinking.Levels` to CPA and Codex. For example, DeepSeek-Flash advertises `low/high/max`, while Qwen3.8-Max advertises `low/medium/xhigh`. Missing effort metadata is not filled from another model family. Request conversion now preserves `high` and `max` alongside the previously supported levels, without conflating them with `xhigh`. No new thinking-off control is exposed by this change.
 
 Keep `upstream` pointed at `mmqz/cpa-multi-plugins` and `origin` at this fork. Fetch official stable tags, switch to `qoder-custom`, then merge the selected stable tag. Resolve conflicts semantically; keep upstream fixes instead of replacing whole files with old copies.
 

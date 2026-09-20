@@ -153,9 +153,8 @@ type openAIRequest struct {
 	Model    string          `json:"model"`
 	Messages []openAIMessage `json:"messages"`
 	Stream   bool            `json:"stream"`
-	// ReasoningEffort is the OpenAI-style thinking dial. Upstream thinking_config
-	// accepts low/medium/xhigh (2026-09-18 probe); empty or invalid leaves the
-	// parameters block untouched so upstream applies its own default (medium).
+	// ReasoningEffort is the OpenAI-style thinking dial. Available levels are
+	// advertised from the account's catalog; absent input keeps upstream defaults.
 	ReasoningEffort string `json:"reasoning_effort"`
 	// Tools is the client's OpenAI tools array, forwarded verbatim when present.
 	Tools json.RawMessage `json:"tools,omitempty"`
@@ -183,12 +182,11 @@ func runeSafePrefix(s string, n int) string {
 }
 
 // normalizeReasoningEffort validates the OpenAI-style reasoning_effort dial.
-// Upstream accepts low/medium/xhigh; anything else returns "" = inject nothing.
-// All models share the qfmodel dial set (2026-09-19 unified reasoning chain).
+// Normalize the union of catalog effort values without conflating high/max/xhigh.
 func normalizeReasoningEffort(s string) string {
 	effort := strings.ToLower(strings.TrimSpace(s))
 	switch effort {
-	case "low", "medium", "xhigh":
+	case "low", "medium", "high", "xhigh", "max":
 		return effort
 	}
 	return ""

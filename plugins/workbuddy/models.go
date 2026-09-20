@@ -688,6 +688,8 @@ type discoveredModel struct {
 	SupportsReasoning  bool            `json:"supportsReasoning"`
 	OnlyReasoning      bool            `json:"onlyReasoning"`
 	Reasoning          json.RawMessage `json:"reasoning"`
+	SupportedEfforts   []string        `json:"supportedEfforts"`
+	CanDisableThinking bool            `json:"canDisableThinking"`
 	DisabledMultimodal bool            `json:"disabledMultimodal"`
 	Disabled           bool            `json:"disabled"`
 	DisabledReason     string          `json:"disabledReason"`
@@ -737,6 +739,11 @@ func (m discoveredModel) reasoning() reasoningMeta {
 	var r reasoningMeta
 	if len(m.Reasoning) > 0 && string(m.Reasoning) != "null" {
 		_ = json.Unmarshal(m.Reasoning, &r)
+	} else {
+		r.CanDisableThinking = m.CanDisableThinking
+	}
+	if len(r.SupportedEfforts) == 0 {
+		r.SupportedEfforts = append([]string(nil), m.SupportedEfforts...)
 	}
 	return r
 }

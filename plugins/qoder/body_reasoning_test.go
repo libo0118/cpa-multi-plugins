@@ -11,7 +11,7 @@ import (
 //   - new model key qfmodel = Qwen3.8-Flash (limited-time free promo)
 //   - every request sends is_reasoning=true + source="system" (unified
 //     reasoning chain); upstream ignores both for models that cannot think
-//   - OpenAI-style reasoning_effort (low/medium/xhigh) maps to the upstream
+//   - OpenAI-style reasoning_effort maps to the model-specific upstream
 //     thinking parameters; absent/invalid keeps upstream defaults
 
 func TestCPAToUpstreamKeyQwen38Flash(t *testing.T) {
@@ -80,7 +80,7 @@ func TestBuildQoderBodyReasoningAlwaysOn(t *testing.T) {
 }
 
 func TestBuildQoderBodyReasoningEffortInjection(t *testing.T) {
-	for _, effort := range []string{"low", "medium", "xhigh", "  XHIGH "} {
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max", "  XHIGH "} {
 		req := &openAIRequest{
 			Model:           "qfmodel",
 			Messages:        []openAIMessage{{Role: "user", Content: "hi"}},
@@ -143,7 +143,7 @@ func TestNormalizeReasoningEffort(t *testing.T) {
 	if got := normalizeReasoningEffort("  XHigh "); got != "xhigh" {
 		t.Errorf("normalizeReasoningEffort trim/case = %q", got)
 	}
-	for _, bad := range []string{"", "ultra", "high", "10", "max"} {
+	for _, bad := range []string{"", "ultra", "10"} {
 		if got := normalizeReasoningEffort(bad); got != "" {
 			t.Errorf("normalizeReasoningEffort(%q) = %q, want empty", bad, got)
 		}
