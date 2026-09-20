@@ -593,6 +593,11 @@ func endpointModelsFor(sa *storedAuth) string {
 // Empty fields are signalled via the X-No-* convention used by CodeBuddy.
 func backendHeaders(req *http.Request, sa *storedAuth) {
 	commonHeaders(req)
+	// WorkBuddy 5.5.6 identifies its bundled CLI with these headers. Billing
+	// leaves the client blank without them. Preserve adopted IDE realm overrides.
+	req.Header.Set("X-IDE-Name", "WorkBuddy")
+	req.Header.Set("X-IDE-Type", "WorkBuddy")
+	req.Header.Set("X-IDE-Version", "5.5.6")
 	applyPlatformHeaders(req, platformForAuth(sa))
 	applyRealmHeaders(req, sa)
 	if sa.Auth.AccessToken != "" {
