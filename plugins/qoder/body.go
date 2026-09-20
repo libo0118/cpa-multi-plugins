@@ -6,7 +6,6 @@
 package main
 
 import (
-	"bytes"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -27,6 +26,8 @@ func cpaToUpstreamKey(cpaModel string) string {
 		return "auto"
 	case "qwen3.8-max-preview", "qwen3.8-max", "qmodel_preview":
 		return "qmodel_preview"
+	case "qwen3.8-flash", "qfmodel":
+		return "qfmodel"
 	case "qwen3.7-max", "qmodel_latest":
 		return "qmodel_latest"
 	case "qwen3.7-plus", "qmodel":
@@ -47,86 +48,104 @@ func cpaToUpstreamKey(cpaModel string) string {
 	return cpaModel
 }
 
-// openAIMessage is one message in the OpenAI chat completion format.
+// openAIMessage is one message in the OpenAI chat completion format. The
+// client's fields ride along verbatim: role/content are decoded for routing
+// and everything else (tool_calls, tool_call_id, name, structured content
+// parts, ...) is preserved byte-for-byte, so multi-turn tool conversations
+// and multimodal payloads survive the hop upstream.
 type openAIMessage struct {
-	Role       string `json:"role"`
-	Content    string `json:"content"`
-	rawContent json.RawMessage
-	rawFields  map[string]json.RawMessage
+	Role       string
+	Content    string
+	contentSet bool
+	// rawContent holds the original JSON when content was not a plain string.
+	rawContent string
+	// raw holds every other client member verbatim.
+	raw map[string]json.RawMessage
 }
 
 func (m *openAIMessage) UnmarshalJSON(data []byte) error {
-	var raw struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
+	m.Role, m.Content, m.contentSet, m.rawContent, m.raw = "", "", false, "", nil
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	delete(fields, "role")
-	delete(fields, "content")
-	content := bytes.TrimSpace(raw.Content)
-	var text string
-	switch {
-	case len(content) == 0 || bytes.Equal(content, []byte("null")):
-	case content[0] == '"':
-		if err := json.Unmarshal(content, &text); err != nil {
-			return err
-		}
-	case content[0] == '[':
-		var parts []struct {
-			Type     string  `json:"type"`
-			Text     *string `json:"text"`
-			ImageURL *struct {
-				URL string `json:"url"`
-			} `json:"image_url"`
-		}
-		if err := json.Unmarshal(content, &parts); err != nil {
-			return fmt.Errorf("unsupported message content array: %w", err)
-		}
-		var joined strings.Builder
-		for i, part := range parts {
-			if part.Type == "image_url" {
-				if part.ImageURL == nil || strings.TrimSpace(part.ImageURL.URL) == "" {
-					return fmt.Errorf("unsupported message content part %d: image_url.url must be a nonempty string", i)
-				}
-				continue
-			}
-			if part.Type != "text" && part.Type != "input_text" {
-				return fmt.Errorf("unsupported message content part %d type %q", i, part.Type)
-			}
-			if part.Text == nil {
-				return fmt.Errorf("unsupported message content part %d: text must be a string", i)
-			}
-			joined.WriteString(*part.Text)
-		}
-		text = joined.String()
-	default:
-		return fmt.Errorf("unsupported message content: expected string, null, or content array")
+	if role, ok := fields["role"]; ok {
+		_ = json.Unmarshal(role, &m.Role)
 	}
-	*m = openAIMessage{Role: raw.Role, Content: text, rawFields: fields}
-	if len(content) > 0 && content[0] != '"' {
-		m.rawContent = append(json.RawMessage(nil), content...)
+	if content, ok := fields["content"]; ok {
+		m.contentSet = true
+		var s string
+		// 0.8.12: JSON null round-trips verbatim — unmarshaling null into a
+		// string silently yields "" and would rewrite the member behind the
+		// client's back (assistant messages carrying tool_calls commonly have
+		// content:null; the protocol authority qoderwork2api preserves null
+		// the same way via plain map decode).
+		if trimmed := strings.TrimSpace(string(content)); trimmed == "null" {
+			m.rawContent = string(content)
+		} else if err := json.Unmarshal(content, &s); err == nil {
+			m.Content = s
+		} else {
+			m.rawContent = string(content)
+		}
+		delete(fields, "content")
+	}
+	delete(fields, "role")
+	if len(fields) > 0 {
+		m.raw = fields
 	}
 	return nil
 }
 
 func (m openAIMessage) MarshalJSON() ([]byte, error) {
-	fields := make(map[string]json.RawMessage, len(m.rawFields)+2)
-	for name, value := range m.rawFields {
-		fields[name] = value
+	out := make(map[string]json.RawMessage, len(m.raw)+2)
+	for k, v := range m.raw {
+		out[k] = v
 	}
-	fields["role"], _ = json.Marshal(m.Role)
-	if len(m.rawContent) > 0 {
-		fields["content"] = m.rawContent
-	} else {
-		fields["content"], _ = json.Marshal(m.Content)
+	switch {
+	case m.rawContent != "":
+		out["content"] = json.RawMessage(m.rawContent)
+	case m.contentSet:
+		enc, err := json.Marshal(m.Content)
+		if err != nil {
+			return nil, err
+		}
+		out["content"] = enc
 	}
-	return json.Marshal(fields)
+	enc, err := json.Marshal(m.Role)
+	if err != nil {
+		return nil, err
+	}
+	out["role"] = enc
+	return json.Marshal(out)
+}
+
+// messageTextContent renders one message's textual content for the
+// chat_context.text mirror of the latest user prompt. Plain strings pass
+// through; structured content arrays contribute their text parts.
+func messageTextContent(m openAIMessage) string {
+	if m.rawContent == "" {
+		return m.Content
+	}
+	if !strings.HasPrefix(m.rawContent, "[") {
+		return ""
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(m.rawContent), &parts); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if p.Text == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(p.Text)
+	}
+	return b.String()
 }
 
 // openAIRequest is the CPA-facing chat completion request.
@@ -134,14 +153,43 @@ type openAIRequest struct {
 	Model    string          `json:"model"`
 	Messages []openAIMessage `json:"messages"`
 	Stream   bool            `json:"stream"`
+	// ReasoningEffort is the OpenAI-style thinking dial. Upstream thinking_config
+	// accepts low/medium/xhigh (2026-09-18 probe); empty or invalid leaves the
+	// parameters block untouched so upstream applies its own default (medium).
+	ReasoningEffort string `json:"reasoning_effort"`
+	// Tools is the client's OpenAI tools array, forwarded verbatim when present.
+	Tools json.RawMessage `json:"tools,omitempty"`
 }
 
-// extractLatestUserPrompt returns the content of the last user message.
+// extractLatestUserPrompt returns the textual content of the last user
+// message (structured content arrays contribute their text parts).
 func extractLatestUserPrompt(messages []openAIMessage) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == "user" {
-			return messages[i].Content
+			return messageTextContent(messages[i])
 		}
+	}
+	return ""
+}
+
+// runeSafePrefix truncates to n runes without splitting UTF-8 sequences
+// (upstream truncates business.name to 30 runes the same way).
+func runeSafePrefix(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+// normalizeReasoningEffort validates the OpenAI-style reasoning_effort dial.
+// Upstream accepts low/medium/xhigh; anything else returns "" = inject nothing.
+// All models share the qfmodel dial set (2026-09-19 unified reasoning chain).
+func normalizeReasoningEffort(s string) string {
+	effort := strings.ToLower(strings.TrimSpace(s))
+	switch effort {
+	case "low", "medium", "xhigh":
+		return effort
 	}
 	return ""
 }
@@ -168,9 +216,17 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 	base["aliyun_user_type"] = userType
 	base["agent_id"] = "agent_common"
 
-	// model_config
+	// model_config. 2026-09-19 upstream behavior: every request sends
+	// is_reasoning=true + source="system" (the qwen3.8-flash reasoning chain).
+	// Models that cannot think ignore these fields upstream (verified by the
+	// reference proxy with a fabricated model key). source="system" is the real
+	// reasoning trigger — without it the gateway never streams reasoning_content.
 	if mc, ok := base["model_config"].(map[string]any); ok {
 		mc["key"] = modelKey
+		mc["is_reasoning"] = true
+		if _, ok := mc["source"]; !ok {
+			mc["source"] = "system"
+		}
 	}
 
 	// chat_context.text.text + chat_context.extra.originalContent.text
@@ -184,36 +240,69 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 			}
 			if mc, ok := extra["modelConfig"].(map[string]any); ok {
 				mc["key"] = modelKey
+				mc["is_reasoning"] = true
 			}
 		}
 	}
 
-	// messages: keep system prompt from baseprompt (template has it), replace user/assistant
-	var systemMsgs []any
-	if msgs, ok := base["messages"].([]any); ok {
-		for _, m := range msgs {
-			if mm, ok := m.(map[string]any); ok {
-				if role, _ := mm["role"].(string); role == "system" {
-					systemMsgs = append(systemMsgs, m)
+	// messages: slim passthrough when the client carries its own system prompt
+	// (every harness does) — forward the conversation verbatim and drop the
+	// 10657-token template system prompt plus template tools. Upstream verified
+	// 2026-09-18 that neither is required (baseline prompt_tokens ~10K → ~60),
+	// which directly extends the headroom before oversized requests fail.
+	// Bare prompts without a system message keep the template for parity.
+	slim := false
+	for _, m := range req.Messages {
+		if m.Role == "system" || m.Role == "developer" {
+			slim = true
+			break
+		}
+	}
+	var outMsgs []any
+	if slim {
+		delete(base, "tools")
+		for _, m := range req.Messages {
+			outMsgs = append(outMsgs, m)
+		}
+	} else {
+		if msgs, ok := base["messages"].([]any); ok {
+			for _, m := range msgs {
+				if mm, ok := m.(map[string]any); ok {
+					if role, _ := mm["role"].(string); role == "system" {
+						outMsgs = append(outMsgs, m)
+					}
 				}
 			}
 		}
+		for _, m := range req.Messages {
+			outMsgs = append(outMsgs, m)
+		}
 	}
-	// Append the actual conversation
-	for _, m := range req.Messages {
-		systemMsgs = append(systemMsgs, m)
+	base["messages"] = outMsgs
+
+	// Client tools win; template tools only ride along in template mode.
+	if len(req.Tools) > 0 && string(req.Tools) != "null" {
+		base["tools"] = req.Tools
 	}
-	base["messages"] = systemMsgs
 
 	// business
 	if biz, ok := base["business"].(map[string]any); ok {
 		biz["id"] = uuid.NewString()
 		biz["begin_at"] = time.Now().UnixMilli()
-		if len(prompt) > 30 {
-			biz["name"] = prompt[:30]
-		} else {
-			biz["name"] = prompt
+		biz["name"] = runeSafePrefix(prompt, 30)
+	}
+
+	// Reasoning dial: inject upstream thinking parameters only when the client
+	// supplied a valid reasoning_effort. Absent/invalid keeps upstream defaults;
+	// the template parameters (max_tokens) are preserved either way.
+	if effort := normalizeReasoningEffort(req.ReasoningEffort); effort != "" {
+		params, _ := base["parameters"].(map[string]any)
+		if params == nil {
+			params = map[string]any{}
+			base["parameters"] = params
 		}
+		params["enable_thinking"] = true
+		params["reasoning_effort"] = effort
 	}
 
 	return json.Marshal(base)

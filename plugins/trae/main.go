@@ -69,6 +69,7 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -139,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.49"
+var version = "0.12.53"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -277,7 +278,7 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	}
 	raw, errHandle := handleMethod(C.GoString(method), requestBytes)
 	if errHandle != nil {
-		writeResponse(response, errorEnvelope("plugin_error", errHandle.Error()))
+		writeResponse(response, errorEnvelopeFor(errHandle))
 		return 1
 	}
 	writeResponse(response, raw)
@@ -432,8 +433,15 @@ type envelope struct {
 }
 
 type envelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code string `json:"code"`
+	// HTTPStatus mirrors pluginabi.Error.HTTPStatus: the host's
+	// decodeEnvelopeResult feeds it into rpcError.StatusCode(), which
+	// resultErrorFromError -> MarkResult uses for per-status cooldown
+	// policy (402->30m, 429->quota backoff, 401->30m). Without it every
+	// plugin failure looks status-less to the host and only gets the
+	// 1-minute transient cooldown, on top of the plugin-side pool.
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 type identifierResponse struct {
@@ -1894,7 +1902,9 @@ func handleExecExecute(request []byte) ([]byte, error) {
 		// Non-2xx: classify and cool the account.
 		kind := upstream.Classify(status, string(body))
 		applyCooldown(a.UID, kind)
-		return nil, fmt.Errorf("upstream %d (%s): %s", status, kind, truncate(string(body), 200))
+		// 0.12.52: account-level statuses ride the error envelope so the
+		// host cooldown layer also stops re-picking a drained credential.
+		return nil, upstreamStatusError(status, chatHTTPErrorFor(status, kind, string(body)))
 	}
 	defer rc.Close()
 
@@ -1902,6 +1912,7 @@ func handleExecExecute(request []byte) ([]byte, error) {
 	if err != nil {
 		if se, ok := err.(*upstream.SOLOStreamError); ok {
 			applyCooldown(a.UID, se.Kind())
+			err = soloStreamErrorCopy(se)
 		}
 		return nil, fmt.Errorf("aggregate: %w", err)
 	}
@@ -1974,7 +1985,9 @@ func handleExecStream(request []byte) ([]byte, error) {
 	if rc == nil {
 		kind := upstream.Classify(status, string(body))
 		applyCooldown(a.UID, kind)
-		return nil, fmt.Errorf("upstream %d (%s): %s", status, kind, truncate(string(body), 200))
+		// 0.12.52: account-level statuses ride the error envelope so the
+		// host cooldown layer also stops re-picking a drained credential.
+		return nil, upstreamStatusError(status, chatHTTPErrorFor(status, kind, string(body)))
 	}
 
 	// v0.12.30: the RPC envelope MUST carry chunks as a slice — the host
@@ -2043,6 +2056,37 @@ func handleExecStream(request []byte) ([]byte, error) {
 // Cooldown / lifecycle
 // -----------------------------------------------------------------------------
 
+// chatHTTPErrorFor renders one upstream HTTP rejection for the client.
+// v0.12.50: input-oversize rejections get request-level actionable copy
+// instead of the historical bare "upstream 400 (client): ..." shape.
+func chatHTTPErrorFor(status int, kind upstream.ErrKind, body string) error {
+	if kind == upstream.ErrInputTooLarge {
+		return fmt.Errorf("输入过大被上游拒绝（上下文/请求体超出上限，请求级问题，与账号无关）：请压缩上下文或清理会话后重试。"+
+			" // Input too large for the upstream model window (request-level, not account-level); shrink the context or start a new session."+
+			" | raw: %s", truncate(body, 200))
+	}
+	return fmt.Errorf("upstream %d (%s): %s", status, kind, truncate(body, 200))
+}
+
+// soloStreamErrorCopy wraps an aggregated in-stream SOLO error: oversize
+// gets request-level guidance (same copy as the HTTP path), rest unchanged.
+func soloStreamErrorCopy(se *upstream.SOLOStreamError) error {
+	if se.Kind() == upstream.ErrInputTooLarge {
+		return fmt.Errorf("%w —— 输入过大被上游拒绝（请求级问题，与账号无关）：请压缩上下文或清理会话后重试", se)
+	}
+	return se
+}
+
+// soloStreamEventMsg renders one in-stream error event for the SSE client;
+// oversize wording gets request-level guidance appended (v0.12.50).
+func soloStreamEventMsg(code int64, msg string) string {
+	base := fmt.Sprintf("trae error code=%d msg=%s", code, msg)
+	if upstream.MsgIndicatesInputTooLarge(msg) {
+		return base + " —— 输入过大被上游拒绝（请求级问题，与账号无关）：请压缩上下文或清理会话后重试"
+	}
+	return base
+}
+
 func applyCooldown(uid string, kind upstream.ErrKind) {
 	switch kind {
 	case upstream.ErrPlanLimit:
@@ -2055,6 +2099,10 @@ func applyCooldown(uid string, kind upstream.ErrKind) {
 		accountPool.Cooldown(uid, pool.CoolSoft, 60*time.Second, "not found (404)")
 	case upstream.ErrServer, upstream.ErrClient:
 		accountPool.NoteError(uid, 3, 10*time.Minute)
+	// v0.12.50: 输入过大是请求级问题——同一请求在任何账号上都会被拒，
+	// 记错误只会把健康账号冷却（NoteError 累计 3 次 → 10 分钟）。
+	case upstream.ErrInputTooLarge:
+		// 请求级失败，不惩罚账号
 	}
 }
 
@@ -2073,6 +2121,49 @@ func okEnvelope(result any) ([]byte, error) {
 func errorEnvelope(code, message string) []byte {
 	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
 	return raw
+}
+
+// errorEnvelopeFor serializes a handler error, preserving the upstream HTTP
+// status when the error carries one (statusError or any StatusCode()
+// implementation). The status crosses the RPC boundary as the envelope error
+// http_status field and drives the host's real per-status credential
+// cooldown (see envelopeError.HTTPStatus).
+func errorEnvelopeFor(err error) []byte {
+	var sc interface{ StatusCode() int }
+	if errors.As(err, &sc) && sc.StatusCode() > 0 {
+		raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{
+			Code: "plugin_error", Message: err.Error(), HTTPStatus: sc.StatusCode(),
+		}})
+		return raw
+	}
+	return errorEnvelope("plugin_error", err.Error())
+}
+
+// statusError carries an upstream HTTP status across the RPC boundary. The
+// host rebuilds it as rpcError whose StatusCode() drives MarkResult's
+// per-status cooldown: 402 -> 30 min, 429 -> escalating quota backoff
+// (credential-scoped), 401 -> 30 min.
+type statusError struct {
+	status int
+	err    error
+}
+
+func (e *statusError) Error() string   { return e.err.Error() }
+func (e *statusError) StatusCode() int { return e.status }
+func (e *statusError) Unwrap() error   { return e.err }
+
+// upstreamStatusError wraps a chat failure for the host cooldown layer.
+// trae policy: only 401/402/429 pass. 404 stays status-less — the host maps
+// 404 to 12h while the plugin pool intends CoolSoft 60s; plan-limit bodies
+// and input-too-large are already handled plugin-side (ErrPlanLimit 12h /
+// ErrInputTooLarge no-op) and must not be double-cooled by host policy.
+func upstreamStatusError(status int, err error) error {
+	if status == http.StatusUnauthorized ||
+		status == http.StatusPaymentRequired ||
+		status == http.StatusTooManyRequests {
+		return &statusError{status: status, err: err}
+	}
+	return err
 }
 
 func writeResponse(response *C.cliproxy_buffer, raw []byte) {

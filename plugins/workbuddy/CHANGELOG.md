@@ -1,5 +1,174 @@
 # Changelog
 
+## 0.9.19
+
+### transport-error billing retries + bounded scans + readable bridge errors (repo v0.12.64)
+
+User report (2026-09-20): the 开学季/券码 dialog failed with the cryptic
+"JSON.parse: unexpected end of data at line 1 column 1 of the JSON data",
+and credits queries against the Intl gateway surfaced repeated
+`Post "https://www.codebuddy.ai/v2/billing/meter/get-user-resource": EOF`
+as hard failures.
+
+Root cause one (billing): isTransientBillingErr's doc comment always
+promised transport retries, but the implementation only matched 5xx
+prefixes — a gateway that closes the connection mid-request (Go's
+`Post "...": EOF`) never got a second attempt. Connection-level failures
+(EOF / connection reset / broken pipe / client timeout / TLS handshake
+timeout / dial failures) are now classified transient and retried through
+the existing billingRetryDelays loop; parse-failed and business-code
+errors stay terminal (the pre-existing test boundary
+"parse failed: unexpected EOF" is preserved — that shape means the server
+DID answer, with garbage).
+
+Root cause two (management scans): handleSchoolVouchers (券码) and
+handleTasksQuery (任务) are per-account fan-outs with no deadline — three
+sequential upstream calls per CN account at up to 120s each on the shared
+client. On a flaky gateway the handler outran the host management bridge,
+which returned an EMPTY body; the panel then threw the cryptic
+JSON.parse error instead of anything actionable. Both scans now carry a
+45s budget: accounts starting past the deadline are reported as
+`skipped: "scan budget exceeded（扫描超时，稍后重试）"` and the envelope
+always completes; individual school calls are additionally capped at 20s
+via request context (honored on the direct-client path). The explicit
+任务 run-all intentionally keeps unbounded semantics — it genuinely runs
+the whole growth loop.
+
+Root cause three (panel): api() decoded responses with a bare r.json().
+It now reads text first and converts non-JSON/empty bodies into a
+readable error carrying the HTTP status and a snippet
+("管理桥接响应异常（HTTP xxx）… 响应体为空（上游扫描超时或桥接中断）").
+
+Intl model aliases (field report: only fast-model / auto-chat /
+balanced-model / default-model visible, the limited-free "deepseek
+flash" nowhere to be found): codebuddy.ai's discovery endpoints return
+product-TIER aliases, and the alias itself is the routable upstream id —
+chat requests send it verbatim and it works. Upstream does not publish
+which real model backs each tier, so no id can be invented client-side.
+The four known aliases now carry display names annotating them as
+upstream aliases (Fast Model（上游别名） etc.) via discoverToInfo; real
+ids (o4-mini) and rows with richer upstream display names are untouched.
+
+## 0.9.18
+
+### neutralPrompt scope fix + 2026-09 growth contract (repo v0.12.63)
+
+User report (2026-09-20): workbuddy conversations "reset every so often",
+the model answers "You are a helpful AI assistant that helps with software
+engineering tasks." when interrupted, tool output "looks truncated" (long
+stdout comes back empty, .ps1/.md files unreadable) — the agent itself
+started printing files in small chunks to work around it. Separately, the
+task center showed far fewer tasks than expected.
+
+Root cause one (payload): the neutralPrompt wholesale replacement was applied
+to messages of EVERY role. OmniRoute codebuddy-cn.ts (the porting source)
+gates it on `message.role !== "system" -> return message` verbatim; our port
+lost the role check. Any user paste / tool result / assistant history entry
+over maxSystemPromptBytes (2000) — or merely quoting an agent identity line —
+was silently rewritten to neutralPrompt. The upstream model then saw a
+history full of hollow "You are a helpful AI assistant..." messages: long
+tool output appeared "truncated", long pastes disappeared, and the neutral
+prompt itself leaked into answers. Fixed by scoping the replacement to
+role=system messages only (rewriteSystemMessagesInPlace /
+rewriteSystemContentField); the array shape now collapses into a single text
+part (OmniRoute parity) instead of one neutralPrompt per part.
+
+Root cause two (task center): the 2026-09 upstream contract changed
+(Coding2API f18dc3d, "five stuck tasks piled up 650 unclaimed credits"):
+
+- accept_status is FIVE-state (not_accepted | accepted | in_progress |
+  completed | claimed); only ""/"not_accepted" tasks need enrolling. The old
+  three-state guess treated non-empty statuses as accepted.
+- Claimability now also trusts accept_status=="completed" (progress fields
+  lag on some task types); the progress-reached test stays as fallback.
+- Batched accept (20/call) with per-task results surfaced — silent
+  "prerequisite not met" rejections stay visible.
+- Redemption reads the GRANTED fields (credit_granted/energy_granted); a
+  400 "unknown tier" retries once with the legacy day-number form; the 403
+  "连续登录天数不足" tier-lock renders as a normal "not unlocked" line.
+- Claims run BEFORE the lottery (task rewards grant chances — spendable the
+  same run). Travel claim reads the credit field with reward_credit fallback.
+- New steps: buddy box (the energy sink — energy has no other outlet) and an
+  energy-balance tail. Lottery chances moved to /lottery/chances (balance)
+  with the legacy summary endpoint as fallback.
+- A credential-level 401/403 aborts the remaining growth-domain steps
+  (growthHTTPError carries the HTTP status; tier-locked 403 exempt).
+
+Regression tests: sanitize_scope_test.go (non-system messages preserved
+verbatim, agent-identity user text preserved, system array collapse,
+end-to-end pipeline), growth_contract_test.go (five-state matrix, completed
+claimability, error taxonomy, per-task accept results, granted fields +
+day retry, travel-claim credit priority, lottery endpoint fallback).
+
+## 0.9.17
+
+### Credential cooldown finally reaches the host (repo v0.12.62)
+
+User report (2026-09-20): an account with drained credits + exhausted
+free-tier quota keeps being picked for every request — the second failure in
+a row still goes to the same credential.
+
+Root cause: our RPC error envelope carried only code+message. The host's
+decodeEnvelopeResult therefore built a status-less rpcError (StatusCode()=0)
+and MarkResult could only apply its 1-minute transient default cooldown —
+invisible in practice. The host machinery itself was always there (402 -> 30
+min, 429 -> escalating quota backoff with credential-scoped model expansion,
+401 -> 30 min; cooled credentials are filtered before scheduler pick, plugin
+routing included).
+
+- envelopeError gains `http_status` (mirrors pluginabi.Error); errorEnvelopeFor
+  extracts StatusCode() from handler errors and serializes it across the RPC.
+- statusError + upstreamStatusError wrap translated upstream chat failures in
+  the execute and collect paths with an explicit pass-through matrix:
+  account-level 401/402/429 and business-envelope 403 pass; 413/11115 prompt
+  overflow, 11128 channel risk control, 11102 model-catalog rejection and bare
+  403 WAF challenges stay status-less (request/IP-level — a credential must
+  not be cooled for problems any account would hit).
+- panel.html: the done-state button added a 1px border on top of border:0,
+  shifting its layout size by 2px versus sibling buttons; replaced with an
+  inset box-shadow ring (no layout change).
+- Regression tests: envelope carries/omits http_status; the full
+  upstreamStatusError policy matrix.
+
+## 0.9.16
+
+### Copy precision for prompt-too-long (repo v0.12.61)
+
+Code-review follow-up on v0.12.59/0.9.15: the prompt-too-long translation
+hardcoded "code 11115 prompt is too long" in its client-facing copy, but the
+detection itself (v0.9.15) also matches bare 413 gateway rejections (HTML /
+empty body) and the extended wording family — none of which carry code 11115.
+
+- The code mention is now conditional: bodies containing 11115 keep the
+  "code 11115 prompt is too long" detail; everything else shows
+  "413/context limit exceeded" instead of pointing users at a code that
+  is not in the raw response.
+- Guidance core (缩短上下文 / 与账号无关 / request-level) unchanged.
+
+## 0.9.15
+
+### Large-input resilience (repo v0.12.59)
+
+Same treatment qoder 0.8.11 got, ported to the CodeBuddy gateway after user
+reports of "context/input too large → request just fails" on the agent side.
+Upstream evidence: RobbsLuo/Coding2API (2026-09-18, same endpoints —
+copilot.tencent.com / codebuddy.ai /v2/chat/completions).
+
+- `normalizeHistoryInPlace` (payload step 2.5): OpenAI `developer` role →
+  `system` (the Tencent backend rejects developer with channel risk-control
+  11128); dirty tool_calls (missing function/name) dropped, emptied content-less
+  assistant placeholders and dangling role=tool results dropped with them —
+  oversized agent histories trimmed mid-conversation are the main orphan source.
+- Error classification: `isChannelRiskControl` (code 11128 → actionable copy,
+  request-shaped not account-level); prompt-too-long detection now covers bare
+  413 (gateway body-limit rejections, HTML/empty, no envelope) plus an extended
+  wording family (maximum context length / context window / too many tokens /
+  输入过长…), aligned with qoder 0.8.11 chatSizeMarkers.
+- Lifecycle guards: `reconcileAfterExecutorError` / `reconcileByUID` skip
+  prompt-too-long bodies entirely — a 413 body that happens to carry
+  "quota exceeded" wording could previously collide with hardCreditMarkers
+  and mis-trigger the credits reconcile lifecycle.
+
 ## 0.9.14
 
 ### School-season automation + chat error-shape alignment (repo v0.12.56)

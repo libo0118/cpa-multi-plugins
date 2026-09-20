@@ -8,6 +8,8 @@
 
 These changes do not grant model entitlements or implement organization identity support. Display names and aliases remain CPA configuration (`oauth-model-alias.qoder`), separate from plugin code.
 
+Merged upstream stable baseline: `v0.12.64`; Qoder build version: `0.8.13-qoder.1`. The upstream message passthrough supersedes the earlier custom image parser, while the mixed-content regression test remains. Upstream null-content, tool, reasoning and large-input handling are retained.
+
 ## Updating
 
 Keep `upstream` pointed at `mmqz/cpa-multi-plugins` and `origin` at this fork. Fetch official stable tags, switch to `qoder-custom`, then merge the selected stable tag. Resolve conflicts semantically; keep upstream fixes instead of replacing whole files with old copies.

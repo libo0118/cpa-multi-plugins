@@ -3,18 +3,17 @@ package main
 import (
 	"encoding/json"
 	"reflect"
-	"strings"
 	"testing"
 )
 
 func TestOpenAITextContent(t *testing.T) {
 	var req openAIRequest
-	err := json.Unmarshal([]byte(`{"model":"qoder/Auto","stream":true,"messages":[{"role":"system","content":"instructions"},{"role":"assistant","content":null},{"role":"user","content":[{"type":"text","text":"first\n"},{"type":"input_text","text":"第二段"},{"type":"text","text":" last"}]}]}`), &req)
+	err := json.Unmarshal([]byte(`{"model":"qoder/Auto","stream":true,"messages":[{"role":"system","content":"instructions"},{"role":"assistant","content":null},{"role":"user","content":[{"type":"text","text":"first"},{"type":"input_text","text":"第二段"},{"type":"text","text":"last"}]}]}`), &req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "first\n第二段 last"
-	if req.Messages[0].Content != "instructions" || req.Messages[1].Content != "" || req.Messages[2].Content != want {
+	want := "first\n第二段\nlast"
+	if req.Messages[0].Content != "instructions" || req.Messages[1].Content != "" || messageTextContent(req.Messages[2]) != want {
 		t.Fatalf("unexpected normalized messages: %+v", req.Messages)
 	}
 	body, err := buildQoderBody(&req, "auto", "test")
@@ -44,19 +43,6 @@ func TestOpenAITextContent(t *testing.T) {
 			t.Fatalf("upstream message %d: got %+v want %+v", i, got, req.Messages[i])
 		}
 	}
-	for _, content := range []string{
-		`[{"type":"image_url","image_url":{}}]`,
-		`[{"type":"image_url","image_url":{"url":12}}]`,
-		`[{"type":"unknown","text":"do not ignore"}]`,
-		`[{"type":"text"}]`, `[{"type":"text","text":null}]`,
-		`[{"type":"text","text":123}]`, `[null]`, `{}`, `42`, `true`,
-	} {
-		var message openAIMessage
-		err := json.Unmarshal([]byte(`{"role":"user","content":`+content+`}`), &message)
-		if err == nil || !strings.Contains(err.Error(), "unsupported") {
-			t.Errorf("content %s: expected unsupported error, got %v", content, err)
-		}
-	}
 }
 
 func TestOpenAIImageContentSurvivesQoderBody(t *testing.T) {
@@ -84,7 +70,7 @@ func TestOpenAIImageContentSurvivesQoderBody(t *testing.T) {
 			t.Fatal("image parts, order, null content, or tool fields were lost")
 		}
 		prompt := upstream["chat_context"].(map[string]any)["text"].(map[string]any)["text"]
-		if prompt != "Read this image. Exactly." {
+		if prompt != "Read \nthis image.\n Exactly." {
 			t.Fatalf("text mirror changed: %v", prompt)
 		}
 	}

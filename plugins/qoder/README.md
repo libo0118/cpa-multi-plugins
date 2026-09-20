@@ -14,6 +14,7 @@
 | **登录自动领包** | OAuth 登录成功后自动判断并领取一次性 Pro 升级包（eligibility → claim） |
 | **COSY 推理** | RSA 包 AES 会话密钥 + MD5 请求签名，按账号区域对接 gateway.qoder.com.cn（CN）/ api3.qoder.sh（Intl）SSE 流式 |
 | **动态模型** | COSY 拉取 `/algo/api/v2/model/list`（chat scene），10 静态模型兜底 |
+| **大上下文** | 客户端自带 system 时自动模板瘦身（省 ~10K token/请求）+ 消息逐字透传（tool_calls/多模态 content 保真）+ 客户端 tools 直通；上游判输入过大（413/过长文案）时给出明确指引，与账号积分问题严格区分 |
 | **每日签到** | 面板手动签到（单账号/批量）+ 09:00/21:00 定时自动签到，签到后返回最新积分快照 |
 | **积分面板** | 账号卡片：昵称/积分/计划/签到状态/操作（签到/刷新/选用） |
 | **token 保活** | 22:00 定时刷新；按 token 前缀路由（drt- → deviceToken/refresh，jrt- → jobToken/refresh），PAT 永不劫持 OAuth 刷新 |
@@ -92,7 +93,9 @@ auth 文件字段（可共存）：
 
 ## 模型
 
-10 个静态模型（`qmodel_preview` 等）+ COSY 动态拉取。CPA 侧别名示例：`qoder/qwen3.8-max` → `qmodel_preview`。
+11 个静态模型（`qmodel_preview`、`qfmodel` 等）+ COSY 动态拉取。CPA 侧别名示例：`qoder/qwen3.8-max` → `qmodel_preview`。
+
+思考模式：2026-09-19 起对齐上游——所有请求统一 `is_reasoning: true` + `source: "system"`（不支持思考的模型上游自动忽略）；客户端可传 OpenAI 风格 `reasoning_effort`（`low`/`medium`/`xhigh`），非法值/缺省走上游默认（medium）。`Qwen3.8-Flash`（`qfmodel`）为官方限时免费模型（2026-10 前），动态发现与静态目录均已收录。
 
 ## 参考文档
 

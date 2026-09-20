@@ -34,7 +34,7 @@ type creditsSummary struct {
 	TotalUsed float64 `json:"total_used"`
 	// TotalSize is the credit capacity/pool (sum of package sizes). remain+used ≈ size.
 	TotalSize float64 `json:"total_size"`
-	SizeKnown bool `json:"size_known"`
+	SizeKnown bool    `json:"size_known"`
 	// PackCount is number of resource packages included in the aggregate.
 	PackCount int `json:"pack_count"`
 	// FetchedAt is when this snapshot was taken (RFC3339). Upstream billing lag
@@ -45,15 +45,15 @@ type creditsSummary struct {
 }
 
 type packageSummary struct {
-	Name       string `json:"name"`
-	Remain     float64  `json:"remain"`
-	Used       float64  `json:"used"`
-	Size       float64  `json:"size"`
-	Kind       string `json:"kind"`
-	SizeKnown  bool `json:"size_known"`
-	Available  bool `json:"available"`
-	CycleStart string `json:"cycle_start"`
-	CycleEnd   string `json:"cycle_end"`
+	Name       string  `json:"name"`
+	Remain     float64 `json:"remain"`
+	Used       float64 `json:"used"`
+	Size       float64 `json:"size"`
+	Kind       string  `json:"kind"`
+	SizeKnown  bool    `json:"size_known"`
+	Available  bool    `json:"available"`
+	CycleStart string  `json:"cycle_start"`
+	CycleEnd   string  `json:"cycle_end"`
 }
 
 type checkinSummary struct {
