@@ -22,8 +22,8 @@ func TestAggregateCompletion_BasicSSE(t *testing.T) {
 
 func TestAggregateCompletion_Empty(t *testing.T) {
 	_, err := aggregateCompletion(strings.NewReader(""), "test")
-	if err != nil {
-		t.Fatalf("empty should not error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "empty_stream") {
+		t.Fatalf("empty stream must fail explicitly: %v", err)
 	}
 }
 

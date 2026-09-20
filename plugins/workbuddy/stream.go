@@ -38,8 +38,35 @@ func streamEmitError(streamID, message string) {
 		return
 	}
 	// A-37: never emit raw upstream bodies that may contain Bearer/JWT.
-	errJSON, _ := json.Marshal(map[string]any{"error": map[string]any{"message": redactSecrets(message)}})
-	_ = streamEmit(streamID, errJSON)
+	body, _ := json.Marshal(map[string]any{"stream_id": streamID, "error": redactSecrets(message)})
+	_, _ = hostCall(pluginabi.MethodHostStreamEmit, body)
+}
+
+// Inspect errors before translation, retaining the original JSON and its billing precision.
+func workBuddyStreamFrame(line string) (string, bool, error) {
+	line = strings.TrimSpace(line)
+	if line == "event:error" || line == "event: error" {
+		return "", false, fmt.Errorf("workbuddy upstream error event")
+	}
+	if line == "" || strings.HasPrefix(line, ":") || strings.HasPrefix(line, "event:") {
+		return "", false, nil
+	}
+	content := stripDataPrefix(line)
+	if content == "[DONE]" {
+		return content, false, nil
+	}
+	var frame struct {
+		Error   json.RawMessage   `json:"error"`
+		Code    int               `json:"code"`
+		Choices []json.RawMessage `json:"choices"`
+	}
+	if json.Unmarshal([]byte(content), &frame) != nil {
+		return "", false, nil
+	}
+	if (len(frame.Error) > 0 && string(frame.Error) != "null") || frame.Code != 0 {
+		return "", false, fmt.Errorf("workbuddy upstream error: %s", truncateRedacted(content, 200))
+	}
+	return content, len(frame.Choices) > 0, nil
 }
 
 func streamClose(streamID string) {
@@ -101,10 +128,17 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 		return
 	}
 	collector := &sseUsageCollector{}
+	seen := false
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		content := stripDataPrefix(scanner.Text())
+		content, meaningful, frameErr := workBuddyStreamFrame(scanner.Text())
+		if frameErr != nil {
+			publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, frameErr.Error())
+			streamEmitError(streamID, frameErr.Error())
+			return
+		}
+		seen = seen || meaningful
 		if content == "" || content == "[DONE]" {
 			continue
 		}
@@ -127,6 +161,12 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 	if err := scanner.Err(); err != nil {
 		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, err.Error())
 		streamEmitError(streamID, fmt.Sprintf("upstream stream read error: %v", err))
+		return
+	}
+	if !seen {
+		message := "empty_stream: workbuddy upstream closed before a completion payload"
+		publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), true, 0, message)
+		streamEmitError(streamID, message)
 		return
 	}
 	publishUsage(requestedModel, upstreamModel, authUID, started, collector.detail(), false, 0, "")
@@ -196,8 +236,13 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var chunks []pluginapi.ExecutorStreamChunk
+	seen := false
 	for scanner.Scan() {
-		content := stripDataPrefix(scanner.Text())
+		content, meaningful, frameErr := workBuddyStreamFrame(scanner.Text())
+		if frameErr != nil {
+			return chunks, frameErr
+		}
+		seen = seen || meaningful
 		if content == "" || content == "[DONE]" {
 			continue
 		}
@@ -215,6 +260,9 @@ func aggregateSSEWithCollector(r io.Reader, sseFramed bool, collector *sseUsageC
 	}
 	if err := scanner.Err(); err != nil {
 		return chunks, fmt.Errorf("upstream stream read error: %w", err)
+	}
+	if !seen {
+		return chunks, fmt.Errorf("empty_stream: workbuddy upstream closed before a completion payload")
 	}
 	return chunks, nil
 }
@@ -291,11 +339,16 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	toolCalls := map[int]map[string]any{}
 	var toolOrder []int
 	var scanErr error
+	seen := false
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		data := stripDataPrefix(scanner.Text())
+		data, meaningful, frameErr := workBuddyStreamFrame(scanner.Text())
+		if frameErr != nil {
+			return nil, frameErr
+		}
+		seen = seen || meaningful
 		if data == "" || data == "[DONE]" {
 			continue
 		}
@@ -364,6 +417,9 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		return nil, fmt.Errorf("upstream stream read error: %w", scanErr)
 	}
 
+	if !seen {
+		return nil, fmt.Errorf("empty_stream: workbuddy upstream closed before a completion payload")
+	}
 	message := map[string]any{"role": firstNonEmpty(role, "assistant"), "content": content}
 	if reasoning != "" {
 		message["reasoning_content"] = reasoning

@@ -1,0 +1,12 @@
+# WorkBuddy integration
+
+The `qoder-custom` branch also carries WorkBuddy integration. Keep `main` aligned with upstream and merge selected stable releases into this branch. Do not replace custom builds with stock images without carrying these changes forward.
+
+- WorkBuddy native plugin `0.9.19-workbuddy.2`: propagate stream errors through the host error channel, reject empty completion streams, and retain upstream model display names with Credits multipliers. Multipliers are informational, not per-request billing formulas; model IDs remain stable.
+- [CPA core](https://github.com/libo0118/CLIProxyAPI/tree/qoder-custom): capture the original `usage.credit` JSON number before translation and publish optional `workbuddy_credits` metadata only for WorkBuddy. Missing metadata is not zero. The existing Qoder billing path is unchanged.
+- [Keeper](https://github.com/libo0118/cpa-usage-keeper/tree/qoder-custom): query the authenticated WorkBuddy credits endpoint; preserve separate resource packages and expiry times; retain per-request billing in hot and archive tables. Show the upstream amount rounded to two decimals. Original/discounted values and USD are not inferred. Historical records are not backfilled.
+- [CPA management panel](https://github.com/libo0118/Cli-Proxy-API-Management-Center/tree/qoder-custom): quota and auth-file cards support WorkBuddy, including per-account refresh, total Credits, and expandable resource packages. Credentials remain server-side.
+
+The deployed model aliases should map `workbuddy/Auto`, `workbuddy/Hy3`, and other provider-prefixed names to IDs returned by the account's own model catalog. Preserve existing explicit mappings. CN resource timestamps without an offset use UTC+08:00; never interpret them in the viewer's local timezone.
+
+Before deploying, run plugin tests and the CPA helper/queue/SDK tests, compile the server and native library, run panel verification and Keeper tests/build, and verify the new Keeper image against a database copy. Back up the active images/configuration, native plugin, panel asset and database. Verify both single and bulk quota refresh, Responses SSE/WS, and Credits persistence using minimal requests to an account-supported model.

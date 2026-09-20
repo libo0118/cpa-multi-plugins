@@ -888,6 +888,8 @@ func discoverToInfo(m discoveredModel) pluginapi.ModelInfo {
 	info := pluginapi.ModelInfo{
 		ID:                         m.ID,
 		Name:                       m.Name,
+		DisplayName:                m.Name,
+		Description:                m.Description,
 		ContextLength:              m.inputTokens(),
 		InputTokenLimit:            m.inputTokens(),
 		MaxCompletionTokens:        m.outputTokens(),
@@ -897,6 +899,13 @@ func discoverToInfo(m discoveredModel) pluginapi.ModelInfo {
 	}
 	if info.Name == "" {
 		info.Name = info.ID
+	}
+	if strings.TrimSpace(m.Credits) != "" {
+		info.DisplayName = info.Name + " · " + strings.TrimSpace(m.Credits)
+		if info.Description != "" {
+			info.Description += " | "
+		}
+		info.Description += "Credits multiplier: " + strings.TrimSpace(m.Credits)
 	}
 	// Annotate known Intl tier aliases only when upstream gave no richer
 	// display name (Name==ID means the discovery row carried the bare id).
