@@ -159,11 +159,40 @@ func persistAuthTokens(authIndex string, sa *storedAuth) error {
 	if name == "" {
 		name = authFileNameFor(sa)
 	}
-	raw, err := json.Marshal(sa)
+	raw, err := refreshedAuthJSON(phys.JSON, sa.Auth)
 	if err != nil {
 		return err
 	}
 	return hostAuthSaveJSON(name, raw)
+}
+
+// Refresh only token fields: keep account metadata and operator settings intact.
+func refreshedAuthJSON(original []byte, tokens storedTokens) ([]byte, error) {
+	doc, err := workbuddyAuthDocument(original)
+	if err != nil {
+		return nil, err
+	}
+	auth := doc
+	_, nested := doc["auth"]
+	if nested {
+		auth = nil
+		if err := json.Unmarshal(doc["auth"], &auth); err != nil || auth == nil {
+			return nil, fmt.Errorf("invalid WorkBuddy auth object")
+		}
+	}
+	for key, value := range map[string]any{"accessToken": tokens.AccessToken, "refreshToken": tokens.RefreshToken, "expiresAt": tokens.ExpiresAt} {
+		auth[key], err = json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if nested {
+		doc["auth"], err = json.Marshal(auth)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return json.Marshal(doc)
 }
 
 // markSessionDead flags an auth disabled via the host's standard `disabled`

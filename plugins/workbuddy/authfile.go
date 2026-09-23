@@ -146,13 +146,36 @@ func hostAuthPersistMigrate(name, path, legacyPath string, raw []byte) error {
 	return nil
 }
 
-// buildAuthFileJSON produces host-save payload: nested storage + top-level metadata.
-// extra merges additional top-level keys (optional).
+// workbuddyAuthDocument keeps attribution on every physical credential write.
+func workbuddyAuthDocument(raw []byte) (map[string]json.RawMessage, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil || doc == nil {
+		return nil, fmt.Errorf("invalid WorkBuddy credential object")
+	}
+	for _, key := range []string{"type", "provider"} {
+		if value, exists := doc[key]; exists {
+			var declared string
+			if json.Unmarshal(value, &declared) != nil || (strings.TrimSpace(declared) != "" && !isOurDeclaredType(declared)) {
+				return nil, fmt.Errorf("credential %s does not belong to WorkBuddy", key)
+			}
+		}
+	}
+	doc["type"], doc["provider"], doc["auth_kind"] = json.RawMessage(`"workbuddy"`), json.RawMessage(`"workbuddy"`), json.RawMessage(`"oauth"`)
+	return doc, nil
+}
 
 func hostAuthSaveJSON(name string, raw []byte) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("empty auth file name")
+	}
+	doc, err := workbuddyAuthDocument(raw)
+	if err != nil {
+		return err
+	}
+	raw, err = json.Marshal(doc)
+	if err != nil {
+		return err
 	}
 	saveReq := pluginapi.HostAuthSaveRequest{
 		Name: name,
@@ -174,7 +197,7 @@ func hostAuthSaveJSON(name string, raw []byte) error {
 	return nil
 }
 
-// lifecycleStateUnchanged avoids redundant saves when note/disabled unchanged.
+// buildAuthFileJSON produces nested storage and the host's required metadata.
 
 func buildAuthFileJSON(sa *storedAuth, disabled bool, note string, extra map[string]any) ([]byte, error) {
 	if sa == nil {
@@ -200,6 +223,7 @@ func buildAuthFileJSON(sa *storedAuth, disabled bool, note string, extra map[str
 	for k, v := range extra {
 		out[k] = v
 	}
+	out["auth_kind"] = "oauth"
 	return json.Marshal(out)
 }
 
