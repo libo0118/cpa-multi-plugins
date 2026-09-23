@@ -27,3 +27,25 @@ func TestQoderEnvelopeErrorsAndToolPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestQoderEnvelopeReportsProviderDetails(t *testing.T) {
+	const message = "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
+	inner := map[string]any{"error": map[string]any{"message": message + " Bearer secret-token-123456789"}}
+	rawInner, _ := json.Marshal(inner)
+	for _, details := range []any{string(rawInner), inner} {
+		body, _ := json.Marshal(map[string]any{"code": "provider_error", "type": "provider_error", "message": "Error in upstream response", "details": details})
+		frame, _ := json.Marshal(map[string]any{"body": string(body), "statusCodeValue": 400})
+		_, err := unwrapQoderFrame("data:" + string(frame))
+		if err == nil {
+			t.Fatal("upstream rejection ignored")
+		}
+		for _, want := range []string{"status=400", "code=provider_error", "type=provider_error", message} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("missing %q: %v", want, err)
+			}
+		}
+		if strings.Contains(err.Error(), "secret-token-123456789") {
+			t.Fatal("credential exposed")
+		}
+	}
+}

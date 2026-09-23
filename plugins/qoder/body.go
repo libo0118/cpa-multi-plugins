@@ -259,9 +259,6 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 	var outMsgs []any
 	if slim {
 		delete(base, "tools")
-		for _, m := range req.Messages {
-			outMsgs = append(outMsgs, m)
-		}
 	} else {
 		if msgs, ok := base["messages"].([]any); ok {
 			for _, m := range msgs {
@@ -272,9 +269,23 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 				}
 			}
 		}
-		for _, m := range req.Messages {
-			outMsgs = append(outMsgs, m)
+	}
+	for _, m := range req.Messages {
+		// Qoder drops assistant tool calls without content, orphaning the next
+		// tool result. Add text only to empty messages, on this value copy.
+		if m.Role == "assistant" && strings.TrimSpace(m.Content) == "" {
+			raw := strings.TrimSpace(m.rawContent)
+			empty := raw == "" || raw == "null"
+			if !empty {
+				var parts []json.RawMessage
+				empty = json.Unmarshal([]byte(raw), &parts) == nil && len(parts) == 0
+			}
+			var calls []json.RawMessage
+			if empty && json.Unmarshal(m.raw["tool_calls"], &calls) == nil && len(calls) > 0 {
+				m.Content, m.rawContent, m.contentSet = "Calling tools.", "", true
+			}
 		}
+		outMsgs = append(outMsgs, m)
 	}
 	base["messages"] = outMsgs
 

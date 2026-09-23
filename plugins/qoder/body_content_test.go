@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -66,8 +67,15 @@ func TestOpenAIImageContentSurvivesQoderBody(t *testing.T) {
 		}
 		want := original["messages"].([]any)
 		got := upstream["messages"].([]any)
+		// Only the empty tool-call assistant needs text for Qoder compatibility;
+		// image parts and every tool field must still survive unchanged.
+		content, _ := got[len(got)-len(want)].(map[string]any)["content"].(string)
+		if strings.TrimSpace(content) == "" {
+			t.Fatal("tool-call assistant still has no content")
+		}
+		want[0].(map[string]any)["content"] = content
 		if !reflect.DeepEqual(got[len(got)-len(want):], want) {
-			t.Fatal("image parts, order, null content, or tool fields were lost")
+			t.Fatal("image parts, order, or tool fields were lost")
 		}
 		prompt := upstream["chat_context"].(map[string]any)["text"].(map[string]any)["text"]
 		if prompt != "Read \nthis image.\n Exactly." {

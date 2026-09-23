@@ -79,12 +79,39 @@ func unwrapQoderFrame(line string) (string, error) {
 	_ = json.Unmarshal([]byte(body), &chunk)
 	if outer.Status >= 400 || (len(chunk.Error) > 0 && string(chunk.Error) != "null") {
 		var detail struct {
-			Code    any    `json:"code"`
-			Type    string `json:"type"`
+			Code    any             `json:"code"`
+			Type    string          `json:"type"`
+			Message string          `json:"message"`
+			Details json.RawMessage `json:"details"`
+		}
+		errorBody := []byte(body)
+		if len(chunk.Error) > 0 && string(chunk.Error) != "null" {
+			errorBody = chunk.Error
+		}
+		_ = json.Unmarshal(errorBody, &detail)
+		// The gateway returns provider errors at the top level, with the
+		// actionable upstream message in details (an object or JSON string).
+		var detailsText string
+		if json.Unmarshal(detail.Details, &detailsText) == nil {
+			detail.Details = json.RawMessage(detailsText)
+		}
+		var nested struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
 			Message string `json:"message"`
 		}
-		_ = json.Unmarshal(chunk.Error, &detail)
-		return "", fmt.Errorf("qoder upstream rejected request (status=%d code=%v type=%s): %s", outer.Status, detail.Code, detail.Type, truncateRedacted(detail.Message, 200))
+		if json.Unmarshal(detail.Details, &nested) == nil {
+			message := nested.Error.Message
+			if message == "" {
+				message = nested.Message
+			}
+			if message != "" {
+				detail.Message += ": " + message
+			}
+		}
+		message := fmt.Sprintf("qoder upstream rejected request (status=%d code=%v type=%s): %s", outer.Status, detail.Code, detail.Type, detail.Message)
+		return "", fmt.Errorf("%s", truncateRedacted(message, 700))
 	}
 	if len(chunk.Choices) == 0 && len(chunk.Usage) == 0 {
 		return "", nil
