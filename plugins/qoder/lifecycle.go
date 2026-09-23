@@ -539,6 +539,7 @@ func listEntryMatchesUID(f pluginapi.HostAuthFileEntry, uid, wantName string) bo
 func enrichAuthMetadata(sa *storedAuth, cr *creditsSummary, disabled bool) map[string]any {
         note := displayNote(sa, cr, disabled)
         return map[string]any{
+                "auth_kind": "oauth",
                 "type":     providerName,
                 "provider": providerName,
                 "logo":     pluginLogoURL,

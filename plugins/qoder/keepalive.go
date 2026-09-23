@@ -164,11 +164,8 @@ func refreshOneAuth(authIndex, authID string) (string, error) {
 // The host's file watcher reloads it; we deliberately do NOT dual-write the
 // physical path (same rule as hostAuthPersist).
 //
-// MUST go through buildAuthFileJSON with the CURRENT top-level fields from
-// the physical file — a bare json.Marshal(sa) would drop type/provider/logo/
-// disabled/note, resurrecting accounts that lifecycle disabled (P0: a 22:00
-// keepalive refresh used to wipe disabled:true and put the account back into
-// rotation).
+// Merge only token fields into the physical document so OAuth attribution and
+// operator settings survive refreshes without re-enabling disabled accounts.
 func persistAuthTokens(authIndex string, sa *storedAuth) error {
 	phys, err := hostAuthGetPhysical(authIndex)
 	if err != nil {
@@ -178,16 +175,7 @@ func persistAuthTokens(authIndex string, sa *storedAuth) error {
 	if name == "" {
 		name = authFileNameFor(sa)
 	}
-	// Carry over the note currently on disk (lifecycle writes credit/status
-	// notes there; dropping it would regress the panel display).
-	note := ""
-	var doc map[string]any
-	if err := json.Unmarshal(phys.JSON, &doc); err == nil {
-		if s, ok := doc["note"].(string); ok {
-			note = s
-		}
-	}
-	raw, err := buildAuthFileJSON(sa, phys.Disabled, note, nil)
+	raw, err := refreshedAuthJSON(phys.JSON, sa.Auth)
 	if err != nil {
 		return err
 	}

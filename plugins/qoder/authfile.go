@@ -153,6 +153,10 @@ func hostAuthSaveJSON(name string, raw []byte) error {
         if name == "" {
                 return fmt.Errorf("empty auth file name")
         }
+        doc, err := qoderAuthDocument(raw)
+        if err != nil { return err }
+        raw, err = json.Marshal(doc)
+        if err != nil { return err }
         saveReq := pluginapi.HostAuthSaveRequest{
                 Name: name,
                 JSON: raw,
@@ -199,6 +203,7 @@ func buildAuthFileJSON(sa *storedAuth, disabled bool, note string, extra map[str
         for k, v := range extra {
                 out[k] = v
         }
+        out["auth_kind"] = "oauth"
         return json.Marshal(out)
 }
 
