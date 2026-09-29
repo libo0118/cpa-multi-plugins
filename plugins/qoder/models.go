@@ -156,7 +156,6 @@ func callModelsAPI(sa *storedAuth) ([]pluginapi.ModelInfo, error) {
 		return nil, fmt.Errorf("cosy sign: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", clientUA)
 	resp, err := hostHTTPDo(req)
 	if err != nil {
 		return nil, err

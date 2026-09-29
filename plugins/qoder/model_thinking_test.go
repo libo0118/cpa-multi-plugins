@@ -21,7 +21,7 @@ func TestCatalogThinkingAndRequest(t *testing.T) {
 		}
 	}
 	for _, effort := range []string{"high", "max"} {
-		body, err := buildQoderBody(&openAIRequest{Messages: []openAIMessage{{Role: "user", Content: "test"}}, ReasoningEffort: effort}, "dfmodel", "personal")
+		body, err := buildQoderBody(&openAIRequest{Messages: []openAIMessage{{Role: "user", Content: "test"}}, ReasoningEffort: effort}, "dfmodel", "personal", regionCN)
 		if err != nil {
 			t.Fatal(err)
 		}

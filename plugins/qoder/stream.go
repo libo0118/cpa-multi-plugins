@@ -236,8 +236,8 @@ func pumpUpstreamStream(httpReq *http.Request, cancel context.CancelFunc, stream
 // (no async stream id): drain the upstream nested SSE, unwrap the inner
 // OpenAI chunks, return them as a slice. The collector, when non-nil,
 // observes the unwrapped inner chunks for usage extraction.
-func collectUpstreamStreamQoder(encodedBody string, sa *storedAuth, modelKey string, sseFramed bool, collector *sseUsageCollector) ([]pluginapi.ExecutorStreamChunk, int, error) {
-	httpReq, err := http.NewRequest(http.MethodPost, endpointChatFor(sa), strings.NewReader(encodedBody))
+func collectUpstreamStreamQoder(ctx context.Context, encodedBody string, sa *storedAuth, modelKey string, sseFramed bool, collector *sseUsageCollector) ([]pluginapi.ExecutorStreamChunk, int, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointChatFor(sa), strings.NewReader(encodedBody))
 	if err != nil {
 		return nil, 0, err
 	}

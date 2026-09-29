@@ -117,7 +117,7 @@ func mustMsg(raw string) openAIMessage {
 }
 
 func TestBuildQoderBodySlimPassthrough(t *testing.T) {
-	raw, err := buildQoderBody(slimRequest(), "qfmodel", "personal_professional_trial")
+	raw, err := buildQoderBody(slimRequest(), "qfmodel", "personal_professional_trial", regionCN)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestBuildQoderBodySlimPassthrough(t *testing.T) {
 func TestBuildQoderBodyClientToolsOverride(t *testing.T) {
 	req := slimRequest()
 	req.Tools = json.RawMessage(`[{"type":"function","function":{"name":"client_tool","parameters":{}}}]`)
-	raw, err := buildQoderBody(req, "qfmodel", "personal_professional_trial")
+	raw, err := buildQoderBody(req, "qfmodel", "personal_professional_trial", regionCN)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestBuildQoderBodyClientToolsOverride(t *testing.T) {
 
 func TestBuildQoderBodyBarePromptKeepsTemplate(t *testing.T) {
 	req := &openAIRequest{Model: "qfmodel", Messages: []openAIMessage{{Role: "user", Content: "你好"}}}
-	raw, err := buildQoderBody(req, "qfmodel", "personal_professional_trial")
+	raw, err := buildQoderBody(req, "qfmodel", "personal_professional_trial", regionCN)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

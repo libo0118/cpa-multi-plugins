@@ -37,7 +37,7 @@ func TestInternationalModelFallback(t *testing.T) {
 			if models[i].ID != id || models[i].OwnedBy != "qoder" || models[i].DisplayName == "" {
 				t.Fatalf("wrong model at %d: %+v", i, models[i])
 			}
-			body, err := buildQoderBody(&openAIRequest{Messages: []openAIMessage{{Role: "user", Content: "test"}}}, cpaToUpstreamKey(id), "test")
+			body, err := buildQoderBody(&openAIRequest{Messages: []openAIMessage{{Role: "user", Content: "test"}}}, cpaToUpstreamKey(id), "test", regionCN)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -17,7 +17,7 @@ func TestOpenAITextContent(t *testing.T) {
 	if req.Messages[0].Content != "instructions" || req.Messages[1].Content != "" || messageTextContent(req.Messages[2]) != want {
 		t.Fatalf("unexpected normalized messages: %+v", req.Messages)
 	}
-	body, err := buildQoderBody(&req, "auto", "test")
+	body, err := buildQoderBody(&req, "auto", "test", regionCN)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestOpenAIImageContentSurvivesQoderBody(t *testing.T) {
 			t.Fatal(err)
 		}
 		req.Stream = stream
-		body, err := buildQoderBody(&req, "smodel", "test")
+		body, err := buildQoderBody(&req, "smodel", "test", regionCN)
 		if err != nil {
 			t.Fatal(err)
 		}

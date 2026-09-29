@@ -17,13 +17,57 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net/http"
 	"net/url"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// Intl values verified from official CLI 1.1.64 on its legacy SSE path.
+// Keep the unverified CN protocol profile unchanged.
+const (
+	clientUA          = "Go-http-client/2.0"
+	cosyVersion       = "0.1.43"
+	intlClientUA      = "Bun/1.4.2"
+	intlClientVersion = "1.1.64"
+)
+
+func cosyVersionFor(region string) string {
+	if normalizeRegion(region) == regionIntl {
+		return intlClientVersion
+	}
+	return cosyVersion
+}
+
+func cosyMachineOS() string {
+	arch, platform := runtime.GOARCH, runtime.GOOS
+	switch arch {
+	case "arm64":
+		arch = "aarch64"
+	case "amd64":
+		arch = "x86_64"
+	case "386":
+		arch = "ia32"
+	}
+	if platform == "windows" {
+		platform = "win32"
+	}
+	return arch + "_" + platform
+}
+
+func applyIntlClientHeaders(req *http.Request, region, userAgent string) {
+	if normalizeRegion(region) != regionIntl {
+		return
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Cosy-Version", intlClientVersion)
+	req.Header.Set("Cosy-ClientType", "5")
+	req.Header.Set("Cosy-MachineOS", cosyMachineOS())
+}
 
 // serverPubKeyPEM is Qoder's RSA public key, hardcoded in the desktop client
 // (/tmp/qw_extract/.../main.js). Used to wrap the per-session AES key.
@@ -163,7 +207,7 @@ func newCosySession(id cosyIdentity) (*cosySession, error) {
 // buildBearer constructs the Authorization header for one request.
 // pathSig is url.Path with the "/algo" prefix stripped; body is the raw
 // (already QoderEncoding-encoded) request body string.
-func (s *cosySession) buildBearer(body, rawURL string) (payloadB64, date, bearer string, err error) {
+func (s *cosySession) buildBearer(body, rawURL, region string) (payloadB64, date, bearer string, err error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "", "", "", err
@@ -173,7 +217,7 @@ func (s *cosySession) buildBearer(body, rawURL string) (payloadB64, date, bearer
 		pathSig = pathSig[len("/algo"):]
 	}
 	payload := map[string]string{
-		"cosyVersion": "0.1.43",
+		"cosyVersion": cosyVersionFor(region),
 		"ideVersion":  "",
 		"info":        s.Info,
 		"requestId":   uuid.NewString(),
@@ -189,8 +233,8 @@ func (s *cosySession) buildBearer(body, rawURL string) (payloadB64, date, bearer
 
 // headers returns the full header set for one inference request.
 // extra headers (x-model-key, x-model-source) are merged in by the caller.
-func (s *cosySession) headers(uid, body, rawURL, accept string, sse bool) (map[string]string, error) {
-	_, date, bearer, err := s.buildBearer(body, rawURL)
+func (s *cosySession) headers(uid, body, rawURL, accept string, sse bool, region string) (map[string]string, error) {
+	_, date, bearer, err := s.buildBearer(body, rawURL, region)
 	if err != nil {
 		return nil, err
 	}
@@ -206,11 +250,22 @@ func (s *cosySession) headers(uid, body, rawURL, accept string, sse bool) (map[s
 		"cosy-clientip":     "169.254.198.161",
 		"authorization":     bearer,
 		"accept-encoding":   "identity",
-		"cosy-version":      "0.1.43",
+		"cosy-version":      cosyVersionFor(region),
 		"cosy-machineid":    s.MachineID,
 		"cosy-machinetoken": s.MachineToken,
 		"login-version":     "v2",
-		"user-agent":        "Go-http-client/2.0",
+		"user-agent":        clientUA,
+	}
+	if normalizeRegion(region) == regionIntl {
+		h["user-agent"] = intlClientUA
+		h["cosy-machineos"] = cosyMachineOS()
+		h["cosy-business-product"] = "cli"
+		h["cosy-business-type"] = "agent"
+		h["cosy-scene"] = "assistant"
+		if sse {
+			// The verified Intl inference request does not send this legacy IP.
+			delete(h, "cosy-clientip")
+		}
 	}
 	if sse {
 		h["cache-control"] = "no-cache"

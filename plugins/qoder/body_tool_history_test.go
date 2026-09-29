@@ -17,7 +17,7 @@ func TestBuildQoderBodyKeepsEmptyToolCallAssistant(t *testing.T) {
 					req.Messages = append([]openAIMessage{mustMsg(`{"role":"system","content":"Answer briefly."}`)}, req.Messages...)
 				}
 				before, _ := json.Marshal(req.Messages)
-				body, err := buildQoderBody(req, "dfmodel", "personal_professional_trial")
+				body, err := buildQoderBody(req, "dfmodel", "personal_professional_trial", regionCN)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -57,7 +57,7 @@ func TestBuildQoderBodyPreservesOtherAssistantContent(t *testing.T) {
 		`{"role":"assistant","content":null,"tool_calls":[]}`,
 	} {
 		req := &openAIRequest{Messages: []openAIMessage{mustMsg(`{"role":"system","content":"Answer briefly."}`), mustMsg(raw), mustMsg(`{"role":"user","content":"Continue."}`)}}
-		body, err := buildQoderBody(req, "dfmodel", "personal_professional_trial")
+		body, err := buildQoderBody(req, "dfmodel", "personal_professional_trial", regionCN)
 		if err != nil {
 			t.Fatal(err)
 		}

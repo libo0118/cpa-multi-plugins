@@ -35,7 +35,7 @@ func TestCPAToUpstreamKeyQwen38Flash(t *testing.T) {
 
 func TestBuildQoderBodyReasoningAlwaysOn(t *testing.T) {
 	req := &openAIRequest{Model: "qfmodel", Messages: []openAIMessage{{Role: "user", Content: "hi"}}}
-	raw, err := buildQoderBody(req, "qfmodel", "personal_professional_trial")
+	raw, err := buildQoderBody(req, "qfmodel", "personal_professional_trial", regionCN)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestBuildQoderBodyReasoningEffortInjection(t *testing.T) {
 			Messages:        []openAIMessage{{Role: "user", Content: "hi"}},
 			ReasoningEffort: effort,
 		}
-		raw, err := buildQoderBody(req, "qfmodel", "personal_professional_trial")
+		raw, err := buildQoderBody(req, "qfmodel", "personal_professional_trial", regionCN)
 		if err != nil {
 			t.Fatalf("build(%q): %v", effort, err)
 		}
@@ -118,7 +118,7 @@ func TestBuildQoderBodyReasoningEffortInvalidIgnored(t *testing.T) {
 			Messages:        []openAIMessage{{Role: "user", Content: "hi"}},
 			ReasoningEffort: effort,
 		}
-		raw, err := buildQoderBody(req, "qmodel_preview", "personal_professional_trial")
+		raw, err := buildQoderBody(req, "qmodel_preview", "personal_professional_trial", regionCN)
 		if err != nil {
 			t.Fatalf("build(%q): %v", effort, err)
 		}

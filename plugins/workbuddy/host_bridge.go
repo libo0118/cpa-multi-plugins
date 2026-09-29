@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,7 +58,26 @@ type hostHTTPResponse struct {
 // call; the flat method/url/headers/body fields are an alternate form we don't
 // use (host prefers Request when present).
 type rpcHostHTTPRequestWire struct {
-	Request *rpcHostHTTPInner `json:"request,omitempty"`
+	Request        *rpcHostHTTPInner `json:"request,omitempty"`
+	HostCallbackID string            `json:"host_callback_id,omitempty"`
+}
+
+type hostCallbackContextKey struct{}
+
+// Keep the host association local to this execution; never send it upstream.
+func hostCallbackContext(id string) context.Context {
+	return context.WithValue(context.Background(), hostCallbackContextKey{}, id)
+}
+
+func hostHTTPRequestWire(req *http.Request, body []byte) rpcHostHTTPRequestWire {
+	id, _ := req.Context().Value(hostCallbackContextKey{}).(string)
+	return rpcHostHTTPRequestWire{
+		HostCallbackID: id,
+		Request: &rpcHostHTTPInner{
+			Method: req.Method, URL: req.URL.String(),
+			Headers: map[string][]string(req.Header), Body: body,
+		},
+	}
 }
 
 type rpcHostHTTPInner struct {
@@ -133,14 +153,7 @@ func hostHTTPDo(req *http.Request) (*hostHTTPResponse, error) {
 	if !hostBridgeAvailable() || runtime.GOOS == "windows" {
 		return hostHTTPDoDirect(req, bodyBytes)
 	}
-	wire := rpcHostHTTPRequestWire{
-		Request: &rpcHostHTTPInner{
-			Method:  req.Method,
-			URL:     req.URL.String(),
-			Headers: map[string][]string(req.Header),
-			Body:    bodyBytes,
-		},
-	}
+	wire := hostHTTPRequestWire(req, bodyBytes)
 	raw, err := hostCall(pluginabi.MethodHostHTTPDo, mustJSON(wire))
 	if err != nil {
 		// Bridge exists but the call failed — fall back to direct so a transient
@@ -259,14 +272,7 @@ func hostHTTPDoStream(req *http.Request) (*hostHTTPStream, int, http.Header, err
 	if !hostBridgeAvailable() {
 		return hostHTTPDoStreamDirect(req, bodyBytes)
 	}
-	wire := rpcHostHTTPRequestWire{
-		Request: &rpcHostHTTPInner{
-			Method:  req.Method,
-			URL:     req.URL.String(),
-			Headers: map[string][]string(req.Header),
-			Body:    bodyBytes,
-		},
-	}
+	wire := hostHTTPRequestWire(req, bodyBytes)
 	raw, err := hostCall(pluginabi.MethodHostHTTPDoStream, mustJSON(wire))
 	if err != nil {
 		return hostHTTPDoStreamDirect(req, bodyBytes)

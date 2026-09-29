@@ -593,11 +593,14 @@ func endpointModelsFor(sa *storedAuth) string {
 // Empty fields are signalled via the X-No-* convention used by CodeBuddy.
 func backendHeaders(req *http.Request, sa *storedAuth) {
 	commonHeaders(req)
-	// WorkBuddy 5.5.6 identifies its bundled CLI with these headers. Billing
-	// leaves the client blank without them. Preserve adopted IDE realm overrides.
-	req.Header.Set("X-IDE-Name", "WorkBuddy")
-	req.Header.Set("X-IDE-Type", "WorkBuddy")
-	req.Header.Set("X-IDE-Version", "5.5.6")
+	if accountRegion(sa) == regionCN && !strings.EqualFold(strings.TrimSpace(platformForAuth(sa)), "ide") {
+		workbuddyHeaders(req)
+	} else {
+		// Preserve the existing Global/IDE attribution until independently verified.
+		req.Header.Set("X-IDE-Name", "WorkBuddy")
+		req.Header.Set("X-IDE-Type", "WorkBuddy")
+		req.Header.Set("X-IDE-Version", "5.5.6")
+	}
 	applyPlatformHeaders(req, platformForAuth(sa))
 	applyRealmHeaders(req, sa)
 	if sa.Auth.AccessToken != "" {
@@ -757,7 +760,7 @@ func toAuthDataOpts(sa *storedAuth, cr *creditsSummary, disabled bool) pluginapi
 // -----------------------------------------------------------------------------
 
 func handleExecExecute(raw []byte) ([]byte, error) {
-	var req pluginapi.ExecutorRequest
+	var req executorStreamRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
 	}
@@ -778,7 +781,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	// prepareUpstreamBody does forceStream + normalizeTools + rewriteSystem +
 	// ensureSystemMessage + rewriteModel in ONE unmarshal/marshal pass.
 	body := prepareUpstreamBody(req.Payload, req.OriginalRequest, sa, upstreamModel)
-	httpReq, err := http.NewRequest(http.MethodPost, endpointChatFor(sa), bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(hostCallbackContext(req.HostCallbackID), http.MethodPost, endpointChatFor(sa), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -849,7 +852,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// No async stream id → fall back to synchronous chunk collection.
 	if req.StreamID == "" {
 		collector := &sseUsageCollector{}
-		chunks, statusCode, errCollect := collectUpstreamStream(body, sa, sseFramed, collector)
+		chunks, statusCode, errCollect := collectUpstreamStream(hostCallbackContext(req.HostCallbackID), body, sa, sseFramed, collector)
 		if errCollect != nil {
 			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errCollect.Error())
 			return nil, errCollect
@@ -864,7 +867,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// Use context.Background() (not nil) so the request can be cancelled when the
 	// client disconnects — otherwise the pump keeps reading a dead upstream until
 	// sharedHTTPClient's 120s timeout, holding a pool slot the whole time.
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(hostCallbackContext(req.HostCallbackID))
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointChatFor(sa), bytes.NewReader(body))
 	if err != nil {
 		cancel()

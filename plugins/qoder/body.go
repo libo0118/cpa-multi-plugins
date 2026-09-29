@@ -194,7 +194,7 @@ func normalizeReasoningEffort(s string) string {
 
 // buildQoderBody renders the upstream agent_chat_generation body for one request.
 // modelKey is the upstream key (already mapped via cpaToUpstreamKey).
-func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, error) {
+func buildQoderBody(req *openAIRequest, modelKey, userType, region string) ([]byte, error) {
 	var base map[string]any
 	if err := json.Unmarshal(basepromptJSON, &base); err != nil {
 		return nil, fmt.Errorf("baseprompt decode: %w", err)
@@ -296,6 +296,7 @@ func buildQoderBody(req *openAIRequest, modelKey, userType string) ([]byte, erro
 
 	// business
 	if biz, ok := base["business"].(map[string]any); ok {
+		biz["version"] = cosyVersionFor(region)
 		biz["id"] = uuid.NewString()
 		biz["begin_at"] = time.Now().UnixMilli()
 		biz["name"] = runeSafePrefix(prompt, 30)

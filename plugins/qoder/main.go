@@ -86,7 +86,6 @@ const (
         // the intl auth/billing API, api3.qoder.sh the intl inference gateway.
         upstreamBaseIntl = "https://openapi.qoder.sh"
         gatewayBaseIntl  = "https://api3.qoder.sh"
-        clientUA       = "Go-http-client/2.0"
 
         // Auth endpoints (PAT → jobToken exchange + refresh).
         endpointJobTokenExchange = upstreamBaseCN + "/api/v1/jobToken/exchange"
@@ -562,7 +561,7 @@ func applyCosyHeaders(req *http.Request, sa *storedAuth, encodedBody, rawURL, mo
         if err != nil {
                 return err
         }
-        hdr, err := sess.headers(sa.Account.UID, encodedBody, rawURL, "text/event-stream", sse)
+        hdr, err := sess.headers(sa.Account.UID, encodedBody, rawURL, "text/event-stream", sse, authRegion(sa))
         if err != nil {
                 return err
         }
@@ -706,7 +705,7 @@ func toAuthDataOpts(sa *storedAuth, cr *creditsSummary, disabled bool) pluginapi
 // -----------------------------------------------------------------------------
 
 func handleExecExecute(raw []byte) ([]byte, error) {
-        var req pluginapi.ExecutorRequest
+        var req executorStreamRequest
         if err := json.Unmarshal(raw, &req); err != nil {
                 return nil, err
         }
@@ -730,13 +729,13 @@ func handleExecExecute(raw []byte) ([]byte, error) {
                 publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "payload parse: "+err.Error())
                 return nil, fmt.Errorf("payload parse: %w", err)
         }
-        body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil))
+        body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil), authRegion(sa))
         if err != nil {
                 publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+err.Error())
                 return nil, fmt.Errorf("body build: %w", err)
         }
         encodedBody := qoderEncode(body)
-        httpReq, err := http.NewRequest(http.MethodPost, endpointChatFor(sa), strings.NewReader(encodedBody))
+        httpReq, err := http.NewRequestWithContext(hostCallbackContext(req.HostCallbackID), http.MethodPost, endpointChatFor(sa), strings.NewReader(encodedBody))
         if err != nil {
                 return nil, err
         }
@@ -814,7 +813,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
                 publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "payload parse: "+err.Error())
                 return nil, fmt.Errorf("payload parse: %w", err)
         }
-        body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil))
+        body, err := buildQoderBody(qwReq, upstreamModel, uiUserType(nil), authRegion(sa))
         if err != nil {
                 publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, 0, "body build: "+err.Error())
                 return nil, fmt.Errorf("body build: %w", err)
@@ -827,7 +826,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
         // No async stream id → fall back to synchronous chunk collection.
         if req.StreamID == "" {
                 collector := &sseUsageCollector{}
-                chunks, statusCode, errCollect := collectUpstreamStreamQoder(encodedBody, sa, upstreamModel, sseFramed, collector)
+                chunks, statusCode, errCollect := collectUpstreamStreamQoder(hostCallbackContext(req.HostCallbackID), encodedBody, sa, upstreamModel, sseFramed, collector)
                 if errCollect != nil {
                         publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errCollect.Error())
                         return nil, errCollect
@@ -842,7 +841,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
         // Use context.Background() (not nil) so the request can be cancelled when the
         // client disconnects — otherwise the pump keeps reading a dead upstream until
         // sharedHTTPClient's 120s timeout, holding a pool slot the whole time.
-        ctx, cancel := context.WithCancel(context.Background())
+        ctx, cancel := context.WithCancel(hostCallbackContext(req.HostCallbackID))
         httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointChatFor(sa), strings.NewReader(encodedBody))
         if err != nil {
                 cancel()

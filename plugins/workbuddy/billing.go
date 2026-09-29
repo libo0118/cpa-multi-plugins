@@ -154,6 +154,9 @@ func billingBaseFor(sa *storedAuth) string {
 // -----------------------------------------------------------------------------
 
 func billingHeaders(req *http.Request, sa *storedAuth) {
+	if !strings.EqualFold(strings.TrimSpace(platformForAuth(sa)), "ide") && accountRegion(sa) == regionCN {
+		workbuddySoftwareHeaders(req)
+	}
 	req.Header.Set("Authorization", "Bearer "+sa.Auth.AccessToken)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")

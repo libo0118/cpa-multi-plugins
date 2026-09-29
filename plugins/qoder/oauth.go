@@ -131,6 +131,7 @@ func fetchUserInfo(jt, region string) (*userInfoResponse, error) {
 	}
 	commonHeaders(req)
 	req.Header.Set("Authorization", "Bearer "+jt)
+	applyIntlClientHeaders(req, region, "qoder/"+intlClientVersion)
 	resp, err := sharedHTTPClient().Do(req)
 	if err != nil {
 		return nil, err
@@ -329,6 +330,7 @@ func pollDeviceToken(nonce, verifier, region string) (*deviceTokenResponse, bool
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "QoderWork")
+	applyIntlClientHeaders(req, region, intlClientUA)
 	resp, err := sharedHTTPClient().Do(req)
 	if err != nil {
 		return nil, false, err
